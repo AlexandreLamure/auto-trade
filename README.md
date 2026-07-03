@@ -3,7 +3,7 @@
 A fully local autonomous stock trading agent that uses a local LLM (via Ollama),
 Alpaca paper trading, and MCP tool servers. A multi-agent investment committee
 performs deep research, debates the best move, and rebalances the paper portfolio
-toward 30-day PnL — up to 10 minutes per cycle, repeated hourly by default.
+toward 30-day PnL — up to 10 minutes per cycle, repeated every 6 hours by default.
 
 Market intelligence is provided by a **separate news analysis service** that
 continuously fetches news, groups articles into market events, and stores
@@ -14,13 +14,13 @@ structured summaries in a shared SQLite event store.
 ## Architecture
 
 ```
-news_main.py  (APScheduler, default every 30 min)
+news_main.py  (APScheduler, default every 6 hours)
   └── news/pipeline.py
        ├── news/collector.py       (APIs + RSS feeds)
        ├── news/analyzer.py        (dedupe, group, LLM enrich)
        └── store/events.py         → data/events.db
 
-main.py  (APScheduler, default every 60 min)
+main.py  (APScheduler, default every 6 hours)
   └── agent/orchestrator.py
        ├── agent/research.py        (Phase 1: Alpaca data + event store query)
        ├── agent/deliberation.py    (Phase 2: 4 traders + chair debate)
@@ -32,11 +32,11 @@ main.py  (APScheduler, default every 60 min)
             └── servers/alpaca.py   → alpaca-mcp-server (stdio)
 ```
 
-**News service** (every 30 min): fetches from RSS (first-class), NewsAPI, Finnhub,
+**News service** (every 6 hours): fetches from RSS (first-class), NewsAPI, Finnhub,
 Alpha Vantage, and Marketaux; deduplicates articles; groups into market events;
 LLM-enriches each event with summary, sentiment, importance, and tickers.
 
-**Trading agent** (every 60 min): reads portfolio data from Alpaca and market events
+**Trading agent** (every 6 hours): reads portfolio data from Alpaca and market events
 from the event store — no live news fetching during deliberation.
 
 ---
@@ -186,13 +186,13 @@ in `research_summary` under the **Market events** section.
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model name |
 | `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
-| `NEWS_LOOP_INTERVAL_MINUTES` | `30` | News service interval |
+| `NEWS_LOOP_INTERVAL_HOURS` | `6` | News service interval (hours) |
 | `WATCHLIST_TICKERS` | `AAPL,NVDA,...` | Tickers for RSS/API watchlist |
 | `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
 | `FINNHUB_API_KEY` | – | Finnhub key (optional) |
 | `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
 | `MARKETAUX_API_KEY` | – | Marketaux key (optional) |
-| `LOOP_INTERVAL_MINUTES` | `60` | Trading agent interval |
+| `LOOP_INTERVAL_HOURS` | `6` | Trading agent interval (hours) |
 | `RESEARCH_SYMBOL_COUNT` | `6` | Max candidate symbols after dedup |
 | `EVENTS_SINCE_HOURS` | `72` | How far back to query events |
 | `EVENTS_MIN_IMPORTANCE` | `2` | Min importance for symbol events |

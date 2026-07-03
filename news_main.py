@@ -1,11 +1,11 @@
 """
 Entry point for the news analysis service.
 
-Runs every NEWS_LOOP_INTERVAL_MINUTES (default 30), fetching news from
+Runs every NEWS_LOOP_INTERVAL_HOURS (default 6), fetching news from
 configured sources, grouping into market events, and storing in SQLite.
 
 Usage:
-    python news_main.py                  # continuous 30-min schedule
+    python news_main.py                  # continuous 6-hour schedule
     python news_main.py --once           # single cycle and exit
     python news_main.py --once --log-level DEBUG
 """
@@ -64,7 +64,7 @@ async def _run_scheduled() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_cycle,
-        trigger=IntervalTrigger(minutes=settings.news_loop_interval_minutes),
+        trigger=IntervalTrigger(hours=settings.news_loop_interval_hours),
         kwargs={"settings": settings},
         id="news_cycle",
         name="News analysis cycle",
@@ -87,8 +87,8 @@ async def _run_scheduled() -> None:
 
     scheduler.start()
     logging.getLogger(__name__).info(
-        "News scheduler started – running every %d minute(s). Press Ctrl+C to stop.",
-        settings.news_loop_interval_minutes,
+        "News scheduler started – running every %d hour(s). Press Ctrl+C to stop.",
+        settings.news_loop_interval_hours,
     )
 
     await run_cycle(settings)
@@ -113,9 +113,9 @@ def main() -> None:
 
     logger = logging.getLogger(__name__)
     logger.info(
-        "Starting news service | model=%s | interval=%dm | store=%s",
+        "Starting news service | model=%s | interval=%dh | store=%s",
         settings.ollama_model,
-        settings.news_loop_interval_minutes,
+        settings.news_loop_interval_hours,
         settings.event_store_path,
     )
 

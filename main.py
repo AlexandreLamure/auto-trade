@@ -2,7 +2,7 @@
 Entry point for the autonomous trading agent.
 
 Starts an APScheduler async scheduler that triggers AgentOrchestrator.run_cycle()
-on the configured interval (default: every 60 minutes via LOOP_INTERVAL_MINUTES).
+on the configured interval (default: every 6 hours via LOOP_INTERVAL_HOURS).
 
 Usage:
     python main.py                        # runs on the configured schedule
@@ -48,7 +48,7 @@ async def _run_scheduled(orchestrator: AgentOrchestrator) -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         orchestrator.run_cycle,
-        trigger=IntervalTrigger(minutes=settings.loop_interval_minutes),
+        trigger=IntervalTrigger(hours=settings.loop_interval_hours),
         id="trading_cycle",
         name="Autonomous trading cycle",
         max_instances=1,          # prevent overlapping runs
@@ -71,8 +71,8 @@ async def _run_scheduled(orchestrator: AgentOrchestrator) -> None:
 
     scheduler.start()
     logging.getLogger(__name__).info(
-        "Scheduler started – running every %d minute(s). Press Ctrl+C to stop.",
-        settings.loop_interval_minutes,
+        "Scheduler started – running every %d hour(s). Press Ctrl+C to stop.",
+        settings.loop_interval_hours,
     )
 
     # Run the first cycle immediately on startup
@@ -106,9 +106,9 @@ def main() -> None:
     _configure_logging(args.log_level)
     logger = logging.getLogger(__name__)
     logger.info(
-        "Starting agent | model=%s | interval=%dm | paper=%s | thinking=%s",
+        "Starting agent | model=%s | interval=%dh | paper=%s | thinking=%s",
         settings.ollama_model,
-        settings.loop_interval_minutes,
+        settings.loop_interval_hours,
         settings.alpaca_paper_trade,
         settings.enable_thinking,
     )

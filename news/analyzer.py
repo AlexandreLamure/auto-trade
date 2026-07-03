@@ -32,7 +32,7 @@ _JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 EVENT_MATCH_THRESHOLD = 0.4
 HEADLINE_MATCH_THRESHOLD = 0.85
-MAX_ENRICHMENTS_PER_CYCLE = 25
+MAX_ENRICHMENTS_PER_CYCLE = 100
 
 ENRICH_SYSTEM_PROMPT = """\
 You are a financial news analyst. Given multiple articles about the same market event,

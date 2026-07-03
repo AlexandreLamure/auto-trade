@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     marketaux_api_key: str = Field("", description="Marketaux API key")
 
     # News service
-    news_loop_interval_minutes: int = Field(
-        30, description="How often the news service runs (minutes)"
+    news_loop_interval_hours: int = Field(
+        6, description="How often the news service runs (hours)"
     )
     watchlist_tickers: str = Field(
         "AAPL,NVDA,MSFT,GOOGL,AMZN",
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     )
 
     # Trading scheduler
-    loop_interval_minutes: int = Field(60, description="How often the agent runs (minutes)")
+    loop_interval_hours: int = Field(6, description="How often the agent runs (hours)")
 
     # Committee
     research_symbol_count: int = Field(6, description="Max candidate symbols after dedup")
