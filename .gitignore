@@ -1,0 +1,8 @@
+.env
+.venv/
+data/
+logs/*.jsonl
+logs/discussions/*.json
+__pycache__/
+*.pyc
+.cursor/
