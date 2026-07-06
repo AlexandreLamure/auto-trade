@@ -18,7 +18,7 @@ from config.settings import Settings
 from servers.manager import MCPManager
 from agent.llm_client import OllamaClient
 from agent.decision import PortfolioDecision, TradeOrder
-from agent.workflow import format_mcp_summary, truncate_text
+from agent.workflow import format_mcp_summary, is_market_open, truncate_text
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, run_deep_research
 from agent.risk import build_validation_context, validate_orders
@@ -50,6 +50,10 @@ class AgentOrchestrator:
 
         try:
             async with MCPManager(self._settings) as manager:
+                market_open, clock_detail = await is_market_open(manager)
+                if not market_open:
+                    log.line(f"SKIP – {clock_detail}")
+                    return
                 await self._run_committee_cycle(manager, cycle_id, log)
 
         except Exception as exc:  # noqa: BLE001

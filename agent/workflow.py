@@ -83,6 +83,48 @@ def extract_mover_symbols(movers_result: str, n: int = 3) -> list[str]:
     return symbols
 
 
+def parse_market_clock(result_text: str) -> tuple[bool | None, str]:
+    """Parse a get_clock response into (is_open, detail). is_open is None if unparseable."""
+    if result_text.startswith("ERROR"):
+        return None, truncate_text(result_text, 200)
+
+    raw = parse_mcp_json(result_text)
+    if raw is None:
+        return None, "could not parse clock response"
+
+    payload = unwrap_alpaca_payload(raw)
+    if not isinstance(payload, dict):
+        return None, truncate_text(result_text, 200)
+
+    is_open = payload.get("is_open")
+    if not isinstance(is_open, bool):
+        return None, truncate_text(result_text, 200)
+
+    next_open = payload.get("next_open") or "?"
+    next_close = payload.get("next_close") or "?"
+    if is_open:
+        return True, f"open until {next_close}"
+    return False, f"next open {next_open}"
+
+
+async def is_market_open(manager: MCPManager) -> tuple[bool, str]:
+    """Return whether the US equity market is open, plus a short status line."""
+    try:
+        result = await manager.call_tool("get_clock", {})
+        result_text = manager.result_to_text(result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_clock failed: %s", exc)
+        return False, f"clock check failed ({exc})"
+
+    is_open, detail = parse_market_clock(result_text)
+    if is_open is None:
+        logger.warning("Could not parse market clock: %s", detail)
+        return False, f"clock response unparseable ({detail})"
+    if not is_open:
+        return False, f"market closed ({detail})"
+    return True, detail
+
+
 async def call_mcp_tool(
     manager: MCPManager,
     name: str,
@@ -134,6 +176,13 @@ def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str
     if name == "get_market_movers":
         syms = extract_mover_symbols(result_text, n=5)
         return f"get_market_movers → {', '.join(syms) or 'none'}"
+
+    if name == "get_clock" and isinstance(payload, dict):
+        is_open = payload.get("is_open")
+        if is_open is True:
+            return f"get_clock(open, closes {payload.get('next_close', '?')})"
+        if is_open is False:
+            return f"get_clock(closed, opens {payload.get('next_open', '?')})"
 
     if name == "place_stock_order":
         return f"place_stock_order({args}) → {truncate_text(result_text, 150)}"

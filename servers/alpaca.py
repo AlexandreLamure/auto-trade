@@ -61,7 +61,7 @@ def get_alpaca_server_params(
         "ALPACA_API_KEY": api_key,
         "ALPACA_SECRET_KEY": secret_key,
         "ALPACA_PAPER_TRADE": "true" if paper_trade else "false",
-        "ALPACA_TOOLSETS": "account,trading,stock-data",
+        "ALPACA_TOOLSETS": "account,trading,stock-data,assets",
     }
 
     return StdioServerParameters(
