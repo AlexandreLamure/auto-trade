@@ -20,7 +20,7 @@ news_main.py  (APScheduler, default every 6 hours)
        ├── news/analyzer.py        (dedupe, group, LLM enrich)
        └── store/events.py         → data/events.db
 
-main.py  (APScheduler, default every 6 hours)
+trade_main.py  (APScheduler, default every 6 hours)
   └── agent/orchestrator.py
        ├── agent/research.py        (Phase 1: Alpaca data + event store query)
        ├── agent/deliberation.py    (Phase 2: 4 traders + chair debate)
@@ -102,7 +102,7 @@ Run both services in separate terminals:
 python news_main.py
 
 # Terminal 2 — trading agent (reads event store)
-python main.py
+python trade_main.py
 ```
 
 ### News service only (populate event store)
@@ -114,7 +114,7 @@ python news_main.py --once
 ### Trading agent — single cycle (testing)
 
 ```bash
-python main.py --once
+python trade_main.py --once
 ```
 
 ---
@@ -165,7 +165,7 @@ auto-trade/
 │   ├── news.log            # News cycle log (human-readable)
 │   └── trading.log         # Trading cycle log (human-readable)
 ├── news_main.py            # News service entry point
-├── main.py                 # Trading agent entry point
+├── trade_main.py           # Trading agent entry point
 ├── .env.example
 ├── requirements.txt
 └── README.md

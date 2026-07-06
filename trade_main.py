@@ -5,8 +5,8 @@ Starts an APScheduler async scheduler that triggers AgentOrchestrator.run_cycle(
 on the configured interval (default: every 6 hours via LOOP_INTERVAL_HOURS).
 
 Usage:
-    python main.py              # runs on the configured schedule
-    python main.py --once       # run a single cycle immediately and exit
+    python trade_main.py              # runs on the configured schedule
+    python trade_main.py --once       # run a single cycle immediately and exit
 """
 
 from __future__ import annotations
