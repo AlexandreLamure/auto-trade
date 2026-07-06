@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
-
 from datetime import datetime, timezone
 
 import httpx
 
-from news.models import RawArticle
+from news.models import Signal
 from news.sources.base import extract_tickers, parse_published
+from news.sources.http_helpers import api_item_to_signal, valid_api_key
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_av_time(value: str | None) -> datetime | None:
@@ -20,20 +22,18 @@ def _parse_av_time(value: str | None) -> datetime | None:
     except ValueError:
         return parse_published(value)
 
-logger = logging.getLogger(__name__)
-
 
 async def fetch_alpha_vantage(
     api_key: str,
     *,
     watchlist_tickers: list[str] | None = None,
-) -> list[RawArticle]:
-    if not api_key or api_key.startswith("your_"):
+) -> list[Signal]:
+    if not valid_api_key(api_key):
         return []
 
     watchlist = watchlist_tickers or []
     tickers = ["FOREX:USD", "CRYPTO:BTC"] + [f"COIN:{s}" for s in watchlist[:3]]
-    articles: list[RawArticle] = []
+    articles: list[Signal] = []
 
     async with httpx.AsyncClient(timeout=20) as client:
         for ticker in tickers:
@@ -54,26 +54,27 @@ async def fetch_alpha_vantage(
                 continue
 
             for item in data.get("feed", []):
-                url = item.get("url") or ""
-                if not url:
-                    continue
-                title = (item.get("title") or "").strip()
-                snippet = (item.get("summary") or title)[:500]
                 item_tickers = [
                     t.get("ticker", "").replace("COIN:", "").upper()
                     for t in item.get("ticker_sentiment", [])
                     if isinstance(t, dict)
                 ]
-                hints = list(dict.fromkeys(item_tickers + extract_tickers(f"{title} {snippet}", known=watchlist)))
-
-                articles.append(
-                    RawArticle(
-                        url=url,
-                        title=title,
-                        source="api:alpha_vantage",
-                        published_at=_parse_av_time(item.get("time_published")),
-                        snippet=snippet,
-                        tickers_hint=hints,
+                title = item.get("title") or ""
+                snippet = item.get("summary") or title
+                hints = list(
+                    dict.fromkeys(
+                        item_tickers + extract_tickers(f"{title} {snippet}", known=watchlist)
                     )
                 )
+                signal = api_item_to_signal(
+                    url=item.get("url") or "",
+                    title=title,
+                    snippet=snippet,
+                    published=_parse_av_time(item.get("time_published")),
+                    source_label="api:alpha_vantage",
+                    watchlist=watchlist,
+                    tickers_hint=hints,
+                )
+                if signal:
+                    articles.append(signal)
     return articles

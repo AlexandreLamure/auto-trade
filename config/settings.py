@@ -1,6 +1,14 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import cached_property
 
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from news.weights import parse_source_weights
+
+_SOURCE_WEIGHTS_DEFAULT = (
+    '{"sec_edgar":1.0,"company_ir":1.0,"rss":0.9,"api":0.8,'
+    '"polymarket":0.6,"reddit":0.5,"stocktwits":0.4,"google_trends":0.3}'
+)
 
 
 class Settings(BaseSettings):
@@ -34,10 +42,29 @@ class Settings(BaseSettings):
     news_loop_interval_hours: int = Field(
         6, description="How often the news service runs (hours)"
     )
-    watchlist_tickers: str = Field(
-        "AAPL,NVDA,MSFT,GOOGL,AMZN",
-        description="Comma-separated tickers for RSS/API watchlist",
+
+    # Signal source weights (JSON map of source type to weight)
+    source_weights: str = Field(
+        _SOURCE_WEIGHTS_DEFAULT,
+        description="JSON map of source type to weight",
     )
+    ir_rss_feeds: str = Field(
+        "{}", description='JSON map of ticker to IR RSS URL, e.g. {"AAPL":"https://..."}'
+    )
+    sec_user_agent: str = Field(
+        "auto-trade/1.0 (contact@example.com)",
+        description="User-Agent for SEC EDGAR API requests (required by SEC)",
+    )
+    google_trends_spike_threshold: float = Field(
+        1.5, description="Emit Google Trends signal when index exceeds this × trailing avg"
+    )
+
+    # Optional signal sources
+    enable_reddit: bool = Field(True, description="Fetch Reddit JSON feeds")
+    enable_polymarket: bool = Field(True, description="Fetch Polymarket prediction markets")
+    enable_google_trends: bool = Field(True, description="Fetch Google Trends spikes")
+    enable_sec_edgar: bool = Field(True, description="Fetch SEC EDGAR filings")
+    enable_stocktwits: bool = Field(False, description="Fetch Stocktwits (often rate-limited)")
 
     # Trading scheduler
     loop_interval_hours: int = Field(6, description="How often the agent runs (hours)")
@@ -65,8 +92,9 @@ class Settings(BaseSettings):
     # LLM thinking mode (Qwen3 etc.)
     enable_thinking: bool = Field(True, description="Enable LLM thinking/reasoning mode")
 
-    # Print LLM thinking and decision JSON to stdout each cycle
-    verbose: bool = Field(False, description="Verbose output: print LLM internals to stdout")
+    @cached_property
+    def source_weights_map(self) -> dict[str, float]:
+        return parse_source_weights(self.source_weights)
 
 
 settings = Settings()

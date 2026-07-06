@@ -5,9 +5,8 @@ Runs every NEWS_LOOP_INTERVAL_HOURS (default 6), fetching news from
 configured sources, grouping into market events, and storing in SQLite.
 
 Usage:
-    python news_main.py                  # continuous 6-hour schedule
-    python news_main.py --once           # single cycle and exit
-    python news_main.py --once --log-level DEBUG
+    python news_main.py              # continuous 6-hour schedule
+    python news_main.py --once       # single cycle and exit
 """
 
 from __future__ import annotations
@@ -15,32 +14,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import signal
-import sys
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
+from pathlib import Path
 
 from config.settings import settings
 from news.pipeline import run_cycle
+from run_service import configure_stderr_logging, run_scheduled_service
+from util.cycle_log import init_news_log
 
-
-def _configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(name)s – %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-        stream=sys.stdout,
-    )
-    for noisy in ("httpx", "httpcore", "openai", "feedparser"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
 
 def _validate_news_settings() -> None:
     """Ensure at least RSS is available (always) and warn on missing API keys."""
     logger = logging.getLogger(__name__)
+    from news.sources.http_helpers import valid_api_key
+
     has_api = any(
-        key and not key.startswith("your_")
+        valid_api_key(key)
         for key in (
             settings.newsapi_key,
             settings.finnhub_api_key,
@@ -50,79 +40,48 @@ def _validate_news_settings() -> None:
     )
     if not has_api:
         logger.warning(
-            "No news API keys configured – running RSS feeds only. "
+            "No news API keys configured – running RSS and free signal sources only. "
             "Set NEWSAPI_KEY, FINNHUB_API_KEY, etc. in .env for broader coverage."
         )
-    logger.info("RSS feeds always enabled (zero cost)")
 
 
 async def _run_once() -> None:
     await run_cycle(settings)
 
 
-async def _run_scheduled() -> None:
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        run_cycle,
-        trigger=IntervalTrigger(hours=settings.news_loop_interval_hours),
-        kwargs={"settings": settings},
-        id="news_cycle",
-        name="News analysis cycle",
-        max_instances=1,
-        misfire_grace_time=60,
-    )
-
-    stop_event = asyncio.Event()
-
-    def _shutdown(*_: object) -> None:
-        logging.getLogger(__name__).info("Shutdown signal received")
-        stop_event.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _shutdown)
-        except NotImplementedError:
-            signal.signal(sig, lambda *_: stop_event.set())
-
-    scheduler.start()
-    logging.getLogger(__name__).info(
-        "News scheduler started – running every %d hour(s). Press Ctrl+C to stop.",
-        settings.news_loop_interval_hours,
-    )
-
-    await run_cycle(settings)
-
-    await stop_event.wait()
-    scheduler.shutdown(wait=False)
-    logging.getLogger(__name__).info("News scheduler stopped.")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="News Analysis Service")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
     args = parser.parse_args()
 
-    _configure_logging(args.log_level)
+    configure_stderr_logging(
+        noisy_loggers=("httpx", "httpcore", "openai", "feedparser"),
+    )
+    news_log = init_news_log(LOGS_DIR / "news.log")
     _validate_news_settings()
 
-    logger = logging.getLogger(__name__)
-    logger.info(
-        "Starting news service | model=%s | interval=%dh | store=%s",
-        settings.ollama_model,
-        settings.news_loop_interval_hours,
-        settings.event_store_path,
+    news_log.line(
+        f"News service started | model={settings.ollama_model} | "
+        f"interval={settings.news_loop_interval_hours}h | store={settings.event_store_path}"
+    )
+    news_log.line(
+        f"Sources: RSS, Reddit={settings.enable_reddit}, Polymarket={settings.enable_polymarket}, "
+        f"GoogleTrends={settings.enable_google_trends}, SEC={settings.enable_sec_edgar}, "
+        f"Stocktwits={settings.enable_stocktwits}"
     )
 
     if args.once:
         asyncio.run(_run_once())
     else:
-        asyncio.run(_run_scheduled())
+        asyncio.run(
+            run_scheduled_service(
+                job_fn=run_cycle,
+                interval_hours=settings.news_loop_interval_hours,
+                job_id="news_cycle",
+                job_name="News analysis cycle",
+                job_kwargs={"settings": settings},
+            )
+        )
 
 
 if __name__ == "__main__":

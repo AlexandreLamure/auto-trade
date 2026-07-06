@@ -13,14 +13,17 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from config.settings import Settings
 from agent.decision import (
     PersonaProposal,
     PortfolioDecision,
+    build_portfolio_snapshot,
     parse_persona_proposal,
     parse_portfolio_decision,
+    portfolio_to_dict,
+    proposal_to_dict,
 )
 from agent.llm_client import OllamaClient
 from agent.personas import (
@@ -33,6 +36,8 @@ from agent.personas import (
     build_trader_personas,
 )
 from agent.research import ResearchBrief
+from agent.workflow import truncate_text
+from util.cycle_log import CycleLog
 
 logger = logging.getLogger(__name__)
 
@@ -79,39 +84,20 @@ class DeliberationTranscript:
         }
 
 
-def _proposal_to_dict(proposal: PersonaProposal) -> dict[str, Any]:
-    return {
-        "persona": proposal.persona,
-        "stance": proposal.stance,
-        "confidence": proposal.confidence,
-        "key_points": proposal.key_points,
-        "commentary": proposal.commentary,
-        "orders": [
-            {
-                "symbol": o.symbol,
-                "side": o.side,
-                "qty": o.quantity,
-                "rationale": o.rationale,
-            }
-            for o in proposal.orders
-        ],
-    }
+def _proposal_from_turn(turn: DeliberationTurn) -> PersonaProposal:
+    if turn.parsed_proposal:
+        data = turn.parsed_proposal
+        from agent.decision import _parse_order_list
 
-
-def _portfolio_to_dict(decision: PortfolioDecision) -> dict[str, Any]:
-    return {
-        "consensus_summary": decision.consensus_summary,
-        "dissent": decision.dissent,
-        "orders": [
-            {
-                "symbol": o.symbol,
-                "side": o.side,
-                "qty": o.quantity,
-                "rationale": o.rationale,
-            }
-            for o in decision.orders
-        ],
-    }
+        return PersonaProposal(
+            persona=data.get("persona", turn.persona),
+            stance=str(data.get("stance", "HOLD")).upper(),
+            orders=_parse_order_list(data.get("orders") or []),
+            confidence=float(data.get("confidence", 0)),
+            key_points=list(data.get("key_points") or []),
+            commentary=str(data.get("commentary", "") or ""),
+        )
+    return parse_persona_proposal(turn.content, persona=turn.persona, extra_text=turn.thinking)
 
 
 def _sizing_hint(brief: ResearchBrief, max_position_pct: float) -> str:
@@ -144,7 +130,7 @@ def _build_debate_user_prompt(
     *,
     max_position_pct: float,
 ) -> str:
-    proposal_text = json.dumps([_proposal_to_dict(p) for p in proposals], indent=2)
+    proposal_text = json.dumps([proposal_to_dict(p) for p in proposals], indent=2)
     return f"""\
 Review the other traders' Round 1 proposals. Agree or disagree, then submit a revised view.
 Do not retreat to HOLD just because others disagree — defend your thesis with sized orders or propose alternatives.
@@ -201,8 +187,7 @@ async def _call_persona(
     user_prompt: str,
     *,
     round_num: int,
-    verbose: bool,
-    print_section: Callable[[str, str | None], None] | None,
+    cycle_log: CycleLog | None,
 ) -> DeliberationTurn:
     messages = [
         {"role": "system", "content": persona.system_prompt},
@@ -210,16 +195,20 @@ async def _call_persona(
     ]
     response = await llm.chat(messages)
     content = response.content or ""
-    if verbose and print_section:
-        print_section(f"{persona.name} (R{round_num}) THINKING", response.thinking)
-        print_section(f"{persona.name} (R{round_num})", content)
+
+    if cycle_log is not None:
+        cycle_log.line(f"[{persona.name} · Round {round_num}]")
+        if response.thinking:
+            cycle_log.line(truncate_text(response.thinking, 2000))
+        cycle_log.line(truncate_text(content, 4000))
+        cycle_log.line("")
 
     if persona.id == "chair":
         parsed = parse_portfolio_decision(content, extra_text=response.thinking)
-        parsed_dict = _portfolio_to_dict(parsed)
+        parsed_dict = portfolio_to_dict(parsed)
     else:
         proposal = parse_persona_proposal(content, persona=persona.id, extra_text=response.thinking)
-        parsed_dict = _proposal_to_dict(proposal)
+        parsed_dict = proposal_to_dict(proposal)
 
     return DeliberationTurn(
         persona=persona.id,
@@ -237,8 +226,7 @@ async def run_committee(
     settings: Settings,
     *,
     cycle_id: str,
-    verbose: bool = False,
-    print_section: Callable[[str, str | None], None] | None = None,
+    cycle_log: CycleLog | None = None,
 ) -> tuple[PortfolioDecision, DeliberationTranscript]:
     """Run multi-round deliberation and return consensus + transcript."""
     started = time.monotonic()
@@ -260,14 +248,8 @@ async def run_committee(
         cycle_id=cycle_id,
         started_at=started_at,
         duration_seconds=0.0,
-        research_summary=brief.summary_markdown[:4000],
-        portfolio_snapshot={
-            "equity": brief.portfolio_equity,
-            "cash": brief.cash_available,
-            "month_pnl_pct": brief.month_pnl_pct,
-            "held_symbols": brief.held_symbols,
-            "candidate_symbols": brief.candidate_symbols,
-        },
+        research_summary=truncate_text(brief.summary_markdown, 4000),
+        portfolio_snapshot=build_portfolio_snapshot(brief),
     )
 
     round1_prompt = _build_round1_user_prompt(
@@ -275,17 +257,14 @@ async def run_committee(
     )
     round1_tasks = [
         _call_persona(
-            llm, persona, round1_prompt, round_num=1, verbose=verbose, print_section=print_section
+            llm, persona, round1_prompt, round_num=1, cycle_log=cycle_log
         )
         for persona in traders
     ]
     round1_turns = await asyncio.gather(*round1_tasks)
     transcript.rounds.extend(round1_turns)
 
-    round1_proposals = [
-        parse_persona_proposal(t.content, persona=t.persona, extra_text=t.thinking)
-        for t in round1_turns
-    ]
+    round1_proposals = [_proposal_from_turn(t) for t in round1_turns]
 
     if settings.enable_debate_round and time.monotonic() < deadline:
         debate_prompt = _build_debate_user_prompt(
@@ -300,8 +279,7 @@ async def run_committee(
                 persona,
                 debate_prompt,
                 round_num=2,
-                verbose=verbose,
-                print_section=print_section,
+                cycle_log=cycle_log,
             )
             transcript.rounds.append(turn)
 
@@ -312,7 +290,7 @@ async def run_committee(
         max_orders=settings.max_orders_per_cycle,
     )
     chair_turn = await _call_persona(
-        llm, chair, chair_prompt, round_num=3, verbose=verbose, print_section=print_section
+        llm, chair, chair_prompt, round_num=3, cycle_log=cycle_log
     )
     transcript.rounds.append(chair_turn)
 
@@ -324,14 +302,13 @@ async def run_committee(
             chair,
             chair_prompt + "\n\nYour previous response was not valid JSON. Output ONLY the JSON block.",
             round_num=3,
-            verbose=verbose,
-            print_section=print_section,
+            cycle_log=cycle_log,
         )
         transcript.rounds.append(chair_turn_retry)
         decision = parse_portfolio_decision(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    transcript.consensus = _portfolio_to_dict(decision)
+    transcript.consensus = portfolio_to_dict(decision)
     transcript.duration_seconds = time.monotonic() - started
     return decision, transcript

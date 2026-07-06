@@ -1,15 +1,13 @@
-"""News source plugin protocol and helpers."""
+"""News source helpers."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-from news.models import RawArticle
+from news.models import Signal
 
 _TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
 
@@ -26,15 +24,6 @@ _TRACKING_PARAMS = frozenset(
         "mc_eid",
     }
 )
-
-
-class NewsSource(Protocol):
-    name: str
-
-    async def fetch(self) -> list[RawArticle]: ...
-
-
-NewsSourceFn = Callable[[], Awaitable[list[RawArticle]]]
 
 
 def normalize_url(url: str) -> str:

@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass
 
 from agent.decision import TradeOrder
-from agent.workflow import parse_float_field, parse_mcp_json, unwrap_alpaca_payload
+from agent.workflow import parse_float_field, parse_mcp_json, _iter_positions, unwrap_alpaca_payload
 from config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -28,25 +28,7 @@ def parse_held_quantities(positions_json: str) -> dict[str, float]:
     raw = parse_mcp_json(positions_json)
     if raw is None:
         return {}
-    payload = unwrap_alpaca_payload(raw)
-    if isinstance(payload, list):
-        positions = payload
-    elif isinstance(payload, dict):
-        positions = payload.get("result") or payload.get("positions") or []
-    else:
-        return {}
-    if not isinstance(positions, list):
-        return {}
-    held: dict[str, float] = {}
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        symbol = str(pos.get("symbol", "")).upper().strip()
-        if not symbol:
-            continue
-        qty = parse_float_field(pos.get("qty") or pos.get("quantity"))
-        held[symbol] = qty
-    return held
+    return dict(_iter_positions(unwrap_alpaca_payload(raw)))
 
 
 def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:

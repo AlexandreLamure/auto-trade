@@ -4,28 +4,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
+from news.weights import UNKNOWN_SOURCE_WEIGHT
 from store.db import connect, get_connection
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+from util.time import parse_iso, to_iso, utcnow
 
 
 def _loads_json_list(value: str | None) -> list[str]:
@@ -68,10 +53,10 @@ class MarketEvent:
             tickers=_loads_json_list(row["tickers"]),
             companies=_loads_json_list(row["companies"]),
             article_count=int(row["article_count"]),
-            first_seen_at=_parse_iso(row["first_seen_at"]) or _utcnow(),
-            last_seen_at=_parse_iso(row["last_seen_at"]) or _utcnow(),
-            created_at=_parse_iso(row["created_at"]) or _utcnow(),
-            updated_at=_parse_iso(row["updated_at"]) or _utcnow(),
+            first_seen_at=parse_iso(row["first_seen_at"]) or utcnow(),
+            last_seen_at=parse_iso(row["last_seen_at"]) or utcnow(),
+            created_at=parse_iso(row["created_at"]) or utcnow(),
+            updated_at=parse_iso(row["updated_at"]) or utcnow(),
         )
 
 
@@ -86,19 +71,23 @@ class StoredArticle:
     snippet: str
     event_id: str
     fetched_at: datetime
+    weight: float = UNKNOWN_SOURCE_WEIGHT
 
     @classmethod
     def from_row(cls, row: Any) -> StoredArticle:
+        keys = row.keys()
+        weight = float(row["weight"]) if "weight" in keys else UNKNOWN_SOURCE_WEIGHT
         return cls(
             id=row["id"],
             url=row["url"],
             url_hash=row["url_hash"],
             title=row["title"],
             source=row["source"],
-            published_at=_parse_iso(row["published_at"]),
+            published_at=parse_iso(row["published_at"]),
             snippet=row["snippet"],
             event_id=row["event_id"],
-            fetched_at=_parse_iso(row["fetched_at"]) or _utcnow(),
+            fetched_at=parse_iso(row["fetched_at"]) or utcnow(),
+            weight=weight,
         )
 
 
@@ -131,7 +120,7 @@ def create_event(
     last_seen_at: datetime | None = None,
 ) -> str:
     event_id = uuid.uuid4().hex
-    now = _utcnow()
+    now = utcnow()
     first_seen = first_seen_at or now
     last_seen = last_seen_at or now
     tickers = tickers or []
@@ -156,10 +145,10 @@ def create_event(
                 json.dumps(tickers),
                 json.dumps(companies),
                 article_count,
-                _iso(first_seen),
-                _iso(last_seen),
-                _iso(now),
-                _iso(now),
+                to_iso(first_seen),
+                to_iso(last_seen),
+                to_iso(now),
+                to_iso(now),
             ),
         )
         conn.commit()
@@ -209,13 +198,13 @@ def update_event(
         values.append(article_count)
     if last_seen_at is not None:
         fields.append("last_seen_at = ?")
-        values.append(_iso(last_seen_at))
+        values.append(to_iso(last_seen_at))
 
     if not fields:
         return
 
     fields.append("updated_at = ?")
-    values.append(_iso(_utcnow()))
+    values.append(to_iso(utcnow()))
     values.append(event_id)
 
     with get_connection(db_path) as conn:
@@ -236,16 +225,17 @@ def insert_article(
     snippet: str,
     event_id: str,
     published_at: datetime | None = None,
+    weight: float = UNKNOWN_SOURCE_WEIGHT,
 ) -> str:
     article_id = uuid.uuid4().hex
-    now = _utcnow()
+    now = utcnow()
     with get_connection(db_path) as conn:
         conn.execute(
             """
             INSERT INTO articles (
                 id, url, url_hash, title, source, published_at, snippet,
-                event_id, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                event_id, fetched_at, weight
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 article_id,
@@ -253,22 +243,15 @@ def insert_article(
                 url_hash,
                 title,
                 source,
-                _iso(published_at) if published_at else None,
+                to_iso(published_at) if published_at else None,
                 snippet,
                 event_id,
-                _iso(now),
+                to_iso(now),
+                weight,
             ),
         )
         conn.commit()
     return article_id
-
-
-def get_event(db_path: str, event_id: str) -> MarketEvent | None:
-    with get_connection(db_path) as conn:
-        row = conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
-        if row is None:
-            return None
-        return MarketEvent.from_row(row)
 
 
 def get_event_articles(db_path: str, event_id: str) -> list[StoredArticle]:
@@ -280,6 +263,50 @@ def get_event_articles(db_path: str, event_id: str) -> list[StoredArticle]:
         return [StoredArticle.from_row(row) for row in rows]
 
 
+def _query_events(
+    db_path: str,
+    *,
+    since_hours: int,
+    min_importance: int = 1,
+    limit: int,
+    tickers: set[str] | None = None,
+    order_by_importance: bool = False,
+) -> list[MarketEvent]:
+    cutoff = to_iso(utcnow() - timedelta(hours=since_hours))
+    order_clause = (
+        "importance DESC, last_seen_at DESC"
+        if order_by_importance
+        else "last_seen_at DESC"
+    )
+    fetch_limit = limit * 3 if tickers and order_by_importance else limit
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM events
+            WHERE last_seen_at >= ?
+              AND importance >= ?
+            ORDER BY {order_clause}
+            LIMIT ?
+            """,
+            (cutoff, min_importance, fetch_limit),
+        ).fetchall()
+
+    events = [MarketEvent.from_row(row) for row in rows]
+
+    if not tickers:
+        return events[:limit]
+
+    matched: list[MarketEvent] = []
+    for event in events:
+        event_tickers = {t.upper() for t in event.tickers}
+        if event_tickers & tickers:
+            matched.append(event)
+        if len(matched) >= limit:
+            break
+    return matched
+
+
 def find_candidate_events(
     db_path: str,
     tickers: list[str],
@@ -287,49 +314,15 @@ def find_candidate_events(
     since_hours: int = 48,
 ) -> list[MarketEvent]:
     if not tickers:
-        return find_recent_events(db_path, since_hours=since_hours, limit=50)
+        return _query_events(db_path, since_hours=since_hours, min_importance=1, limit=50)
 
-    cutoff = _iso(_utcnow() - timedelta(hours=since_hours))
-    ticker_set = {t.upper() for t in tickers}
-
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM events
-            WHERE last_seen_at >= ?
-            ORDER BY last_seen_at DESC
-            LIMIT 200
-            """,
-            (cutoff,),
-        ).fetchall()
-
-    candidates: list[MarketEvent] = []
-    for row in rows:
-        event = MarketEvent.from_row(row)
-        event_tickers = {t.upper() for t in event.tickers}
-        if ticker_set & event_tickers:
-            candidates.append(event)
-    return candidates
-
-
-def find_recent_events(
-    db_path: str,
-    *,
-    since_hours: int = 48,
-    limit: int = 50,
-) -> list[MarketEvent]:
-    cutoff = _iso(_utcnow() - timedelta(hours=since_hours))
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM events
-            WHERE last_seen_at >= ?
-            ORDER BY last_seen_at DESC
-            LIMIT ?
-            """,
-            (cutoff, limit),
-        ).fetchall()
-    return [MarketEvent.from_row(row) for row in rows]
+    return _query_events(
+        db_path,
+        since_hours=since_hours,
+        min_importance=1,
+        limit=200,
+        tickers={t.upper() for t in tickers},
+    )
 
 
 def query_events(
@@ -340,34 +333,15 @@ def query_events(
     min_importance: int = 1,
     limit: int = 30,
 ) -> list[MarketEvent]:
-    cutoff = _iso(_utcnow() - timedelta(hours=since_hours))
-    symbol_set = {s.upper() for s in (symbols or [])}
-
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM events
-            WHERE last_seen_at >= ?
-              AND importance >= ?
-            ORDER BY importance DESC, last_seen_at DESC
-            LIMIT ?
-            """,
-            (cutoff, min_importance, limit * 3),
-        ).fetchall()
-
-    events = [MarketEvent.from_row(row) for row in rows]
-
-    if not symbol_set:
-        return events[:limit]
-
-    matched: list[MarketEvent] = []
-    for event in events:
-        event_tickers = {t.upper() for t in event.tickers}
-        if event_tickers & symbol_set:
-            matched.append(event)
-        if len(matched) >= limit:
-            break
-    return matched
+    symbol_set = {s.upper() for s in (symbols or [])} or None
+    return _query_events(
+        db_path,
+        since_hours=since_hours,
+        min_importance=min_importance,
+        limit=limit,
+        tickers=symbol_set,
+        order_by_importance=True,
+    )
 
 
 def count_events(db_path: str) -> int:

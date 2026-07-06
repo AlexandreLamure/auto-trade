@@ -27,6 +27,7 @@ from agent.workflow import (
     parse_float_field,
     parse_latest_prices,
     parse_mcp_json,
+    truncate_text,
     unwrap_alpaca_payload,
 )
 from store import MarketEvent, init_db, query_events
@@ -47,6 +48,7 @@ class ResearchBrief:
     summary_markdown: str
     raw_sections: dict[str, str] = field(default_factory=dict)
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
+    market_events: list[MarketEvent] = field(default_factory=list)
 
     def to_prompt_context(self) -> str:
         return self.summary_markdown
@@ -86,13 +88,6 @@ def _parse_month_pnl(history_json: str) -> float | None:
         return None
     return ((end - start) / abs(start)) * 100.0
 
-
-def _truncate(text: str, limit: int = 3000) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n… [truncated]"
-
-
 def _format_event(event: MarketEvent) -> str:
     tickers = ", ".join(event.tickers) if event.tickers else "—"
     companies = ", ".join(event.companies) if event.companies else "—"
@@ -103,7 +98,7 @@ def _format_event(event: MarketEvent) -> str:
         f"Importance: {event.importance}/5 | Confidence: {event.confidence:.0%}\n"
         f"- Tickers: {tickers} | Companies: {companies}\n"
         f"- Articles: {event.article_count} | Last updated: {updated}\n"
-        f"- Summary: {_truncate(event.summary, 800)}"
+        f"- Summary: {truncate_text(event.summary, 800)}"
     )
 
 
@@ -201,7 +196,7 @@ def _build_summary(
     for key, title in section_titles.items():
         body = sections.get(key, "").strip()
         if body:
-            lines.extend([f"## {title}", "", _truncate(body, 4000), ""])
+            lines.extend([f"## {title}", "", truncate_text(body, 4000), ""])
 
     return "\n".join(lines)
 
@@ -271,7 +266,7 @@ async def run_deep_research(
         sections["bars"] = bars
         latest_prices = parse_latest_prices(bars)
 
-    events_text, _ = load_market_events(all_symbols, settings)
+    events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
 
     summary = _build_summary(
@@ -295,4 +290,5 @@ async def run_deep_research(
         summary_markdown=summary,
         raw_sections=sections,
         tool_call_log=log,
+        market_events=market_events,
     )

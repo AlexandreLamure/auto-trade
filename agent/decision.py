@@ -13,11 +13,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from util.json_parse import extract_json_block
+
 logger = logging.getLogger(__name__)
 
 _PARSE_FAILURE_REASON = "Could not parse a valid decision from LLM output."
 
-# Strip thinking blocks that reasoning models (Qwen3 etc.) emit inline in content
 _THINK_TAG = "think"
 _THINK_PATTERNS = (
     re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE),
@@ -27,8 +28,6 @@ _THINK_PATTERNS = (
     ),
     re.compile(r"<thinking>.*?</thinking>", re.DOTALL | re.IGNORECASE),
 )
-
-_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 @dataclass
@@ -65,6 +64,56 @@ class PersonaProposal:
     @property
     def parsed_ok(self) -> bool:
         return bool(self.commentary or self.key_points or self.orders or self.stance)
+
+
+def _hold_fallback(persona: str, commentary: str) -> PersonaProposal:
+    return PersonaProposal(
+        persona=persona,
+        stance="HOLD",
+        orders=[],
+        confidence=0.0,
+        key_points=[],
+        commentary=commentary,
+    )
+
+
+def order_to_dict(order: TradeOrder) -> dict[str, Any]:
+    return {
+        "symbol": order.symbol,
+        "side": order.side,
+        "quantity": order.quantity,
+        "qty": order.quantity,
+        "rationale": order.rationale,
+    }
+
+
+def portfolio_to_dict(decision: PortfolioDecision) -> dict[str, Any]:
+    return {
+        "consensus_summary": decision.consensus_summary,
+        "dissent": decision.dissent,
+        "orders": [order_to_dict(o) for o in decision.orders],
+    }
+
+
+def proposal_to_dict(proposal: PersonaProposal) -> dict[str, Any]:
+    return {
+        "persona": proposal.persona,
+        "stance": proposal.stance,
+        "confidence": proposal.confidence,
+        "key_points": proposal.key_points,
+        "commentary": proposal.commentary,
+        "orders": [order_to_dict(o) for o in proposal.orders],
+    }
+
+
+def build_portfolio_snapshot(brief: Any) -> dict[str, Any]:
+    return {
+        "equity": brief.portfolio_equity,
+        "cash": brief.cash_available,
+        "month_pnl_pct": brief.month_pnl_pct,
+        "held_symbols": brief.held_symbols,
+        "candidate_symbols": brief.candidate_symbols,
+    }
 
 
 def _fallback_portfolio_hold(reason: str = _PARSE_FAILURE_REASON) -> PortfolioDecision:
@@ -125,36 +174,15 @@ def _parse_persona_proposal_text(text: str, *, persona: str) -> PersonaProposal:
     clean = _strip_thinking(text)
     raw_json = _extract_json_str(clean, marker_keys=("stance", "orders", "confidence"))
     if raw_json is None:
-        return PersonaProposal(
-            persona=persona,
-            stance="HOLD",
-            orders=[],
-            confidence=0.0,
-            key_points=[],
-            commentary=clean[:800],
-        )
+        return _hold_fallback(persona, clean[:800])
 
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
-        return PersonaProposal(
-            persona=persona,
-            stance="HOLD",
-            orders=[],
-            confidence=0.0,
-            key_points=[],
-            commentary=clean[:800],
-        )
+        return _hold_fallback(persona, clean[:800])
 
     if not isinstance(data, dict):
-        return PersonaProposal(
-            persona=persona,
-            stance="HOLD",
-            orders=[],
-            confidence=0.0,
-            key_points=[],
-            commentary=clean[:800],
-        )
+        return _hold_fallback(persona, clean[:800])
 
     orders = _parse_order_list(data.get("orders") or [])
     key_points_raw = data.get("key_points") or []
@@ -221,9 +249,9 @@ def _validate_portfolio(data: dict) -> PortfolioDecision:
 
 
 def _extract_json_str(text: str, marker_keys: tuple[str, ...] = ("action",)) -> str | None:
-    m = _JSON_BLOCK_RE.search(text)
-    if m:
-        return m.group(1).strip()
+    block = extract_json_block(text)
+    if block:
+        return block
     return _extract_balanced_json_object(text, marker_keys=marker_keys)
 
 

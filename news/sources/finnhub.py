@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-
 from datetime import datetime, timezone
 
 import httpx
 
-from news.models import RawArticle
+from news.models import Signal
 from news.sources.base import extract_tickers, parse_published
+from news.sources.http_helpers import api_item_to_signal, valid_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +27,14 @@ async def fetch_finnhub(
     api_key: str,
     *,
     watchlist_tickers: list[str] | None = None,
-) -> list[RawArticle]:
-    if not api_key or api_key.startswith("your_"):
+) -> list[Signal]:
+    if not valid_api_key(api_key):
         return []
 
     watchlist = watchlist_tickers or []
-    articles: list[RawArticle] = []
+    articles: list[Signal] = []
 
     async with httpx.AsyncClient(timeout=15) as client:
-        # General market news
         try:
             resp = await client.get(
                 "https://finnhub.io/api/v1/news",
@@ -48,31 +47,29 @@ async def fetch_finnhub(
             items = []
 
         for item in items[:20]:
-            url = item.get("url") or ""
-            if not url:
-                continue
-            title = (item.get("headline") or "").strip()
-            snippet = (item.get("summary") or title)[:500]
             related = item.get("related") or ""
-            tickers = extract_tickers(f"{title} {snippet} {related}", known=watchlist)
+            tickers = extract_tickers(
+                f"{item.get('headline', '')} {item.get('summary', '')} {related}",
+                known=watchlist,
+            )
             if related and isinstance(related, str):
                 for sym in related.split(","):
                     s = sym.strip().upper()
                     if s and s not in tickers:
                         tickers.append(s)
 
-            articles.append(
-                RawArticle(
-                    url=url,
-                    title=title,
-                    source="api:finnhub",
-                    published_at=_parse_finnhub_time(item.get("datetime")),
-                    snippet=snippet,
-                    tickers_hint=tickers,
-                )
+            signal = api_item_to_signal(
+                url=item.get("url") or "",
+                title=item.get("headline") or "",
+                snippet=item.get("summary") or "",
+                published=_parse_finnhub_time(item.get("datetime")),
+                source_label="api:finnhub",
+                watchlist=watchlist,
+                tickers_hint=tickers,
             )
+            if signal:
+                articles.append(signal)
 
-        # Per-ticker company news
         for sym in watchlist[:5]:
             try:
                 resp = await client.get(
@@ -91,19 +88,15 @@ async def fetch_finnhub(
                 continue
 
             for item in items[:5]:
-                url = item.get("url") or ""
-                if not url:
-                    continue
-                title = (item.get("headline") or "").strip()
-                snippet = (item.get("summary") or title)[:500]
-                articles.append(
-                    RawArticle(
-                        url=url,
-                        title=title,
-                        source=f"api:finnhub:{sym}",
-                        published_at=_parse_finnhub_time(item.get("datetime")),
-                        snippet=snippet,
-                        tickers_hint=[sym.upper()],
-                    )
+                signal = api_item_to_signal(
+                    url=item.get("url") or "",
+                    title=item.get("headline") or "",
+                    snippet=item.get("summary") or "",
+                    published=_parse_finnhub_time(item.get("datetime")),
+                    source_label=f"api:finnhub:{sym}",
+                    watchlist=watchlist,
+                    tickers_hint=[sym.upper()],
                 )
+                if signal:
+                    articles.append(signal)
     return articles

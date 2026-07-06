@@ -46,11 +46,6 @@ class MCPManager:
         alpaca_session = await self._open_session(alpaca_params, "alpaca")
         await self._register_tools(alpaca_session, "alpaca")
 
-        logger.info(
-            "MCPManager ready – %d tools registered (%s)",
-            len(self.tools),
-            ", ".join(t.name for t in self.tools),
-        )
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
@@ -66,7 +61,6 @@ class MCPManager:
             ClientSession(read, write)
         )
         await session.initialize()
-        logger.info("MCP session '%s' initialised", label)
         return session
 
     async def _register_tools(self, session: ClientSession, label: str) -> None:

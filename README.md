@@ -32,9 +32,11 @@ main.py  (APScheduler, default every 6 hours)
             └── servers/alpaca.py   → alpaca-mcp-server (stdio)
 ```
 
-**News service** (every 6 hours): fetches from RSS (first-class), NewsAPI, Finnhub,
-Alpha Vantage, and Marketaux; deduplicates articles; groups into market events;
-LLM-enriches each event with summary, sentiment, importance, and tickers.
+**News service** (every 6 hours): resolves a dynamic watchlist from Alpaca (held
+positions + top market movers, same as the trading agent); fetches from RSS
+(first-class), NewsAPI, Finnhub, Alpha Vantage, and Marketaux; deduplicates
+articles; groups into market events; LLM-enriches each event with summary,
+sentiment, importance, and tickers.
 
 **Trading agent** (every 6 hours): reads portfolio data from Alpaca and market events
 from the event store — no live news fetching during deliberation.
@@ -115,13 +117,18 @@ python news_main.py --once
 python main.py --once
 ```
 
-### Verbose LLM output
+---
 
-```bash
-python main.py --once --verbose
-```
+## Logging
 
-Or set `VERBOSE=true` in `.env`.
+Each agent writes human-readable cycle logs to a single file. Cycles are separated
+by banner lines. Warnings and errors go to stderr only (nothing printed for normal
+operation).
+
+| File | Service |
+|---|---|
+| `logs/news.log` | Sources fetched, article counts, LLM enrichment |
+| `logs/trading.log` | Alpaca calls, event store query, committee deliberation, orders |
 
 ---
 
@@ -155,24 +162,14 @@ auto-trade/
 ├── data/
 │   └── events.db           # Shared event store (gitignored)
 ├── logs/
-│   ├── runs.jsonl          # Appended after every cycle
-│   └── discussions/        # Full committee transcripts (JSON)
+│   ├── news.log            # News cycle log (human-readable)
+│   └── trading.log         # Trading cycle log (human-readable)
 ├── news_main.py            # News service entry point
 ├── main.py                 # Trading agent entry point
 ├── .env.example
 ├── requirements.txt
 └── README.md
 ```
-
----
-
-## Log format
-
-### `logs/runs.jsonl`
-
-Each line is a JSON object written after every trading cycle. `tool_calls` now
-contains only Alpaca MCP calls (no news fetching). Market intelligence appears
-in `research_summary` under the **Market events** section.
 
 ---
 
@@ -187,7 +184,6 @@ in `research_summary` under the **Market events** section.
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model name |
 | `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
 | `NEWS_LOOP_INTERVAL_HOURS` | `6` | News service interval (hours) |
-| `WATCHLIST_TICKERS` | `AAPL,NVDA,...` | Tickers for RSS/API watchlist |
 | `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
 | `FINNHUB_API_KEY` | – | Finnhub key (optional) |
 | `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
@@ -201,7 +197,6 @@ in `research_summary` under the **Market events** section.
 | `MAX_ORDERS_PER_CYCLE` | `3` | Max orders per rebalancing cycle |
 | `MAX_POSITION_PCT` | `0.20` | Max fraction of cash per buy (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
-| `VERBOSE` | `false` | Print LLM thinking and decisions to stdout |
 
 The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `agent/personas.py`).
 

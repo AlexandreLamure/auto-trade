@@ -1,22 +1,22 @@
-"""Deduplicate articles, group into events, and LLM-enrich."""
+"""Deduplicate signals, group into events, and LLM-enrich."""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 from agent.llm_client import OllamaClient
 from config.settings import Settings
-from news.models import RawArticle
+from news.models import Signal
 from news.sources.base import (
     extract_tickers,
     normalize_title,
     title_similarity,
     url_hash,
 )
+from agent.workflow import truncate_text
+from news.weights import apply_weighted_scores
 from store import (
     article_exists,
     create_event,
@@ -25,18 +25,20 @@ from store import (
     insert_article,
     update_event,
 )
+from util.cycle_log import CycleLog
+from util.json_parse import extract_json_block
+from util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
-
 EVENT_MATCH_THRESHOLD = 0.4
-HEADLINE_MATCH_THRESHOLD = 0.85
 MAX_ENRICHMENTS_PER_CYCLE = 100
 
 ENRICH_SYSTEM_PROMPT = """\
-You are a financial news analyst. Given multiple articles about the same market event,
-produce a concise structured summary for traders.
+You are a financial market analyst. Given multiple signals about the same market event,
+produce a concise structured summary for traders. Signals come from sources with varying
+reliability (SEC filings and IR press releases are most authoritative; social media
+and search trends are least).
 
 Respond with ONLY a fenced JSON block:
 ```json
@@ -65,13 +67,8 @@ class EnrichedEvent:
     companies: list[str]
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _parse_enrichment(text: str) -> EnrichedEvent | None:
-    match = _JSON_BLOCK_RE.search(text)
-    raw = match.group(1) if match else text.strip()
+    raw = extract_json_block(text) or text.strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -109,15 +106,14 @@ def _parse_enrichment(text: str) -> EnrichedEvent | None:
 
 
 def _match_event(
-    article: RawArticle,
+    signal: Signal,
     candidates: list,
 ) -> str | None:
-    norm = normalize_title(article.title)
+    norm = normalize_title(signal.title)
     for event in candidates:
-        if title_similarity(article.title, event.summary) >= EVENT_MATCH_THRESHOLD:
+        if title_similarity(signal.title, event.summary) >= EVENT_MATCH_THRESHOLD:
             return event.id
-        # Compare against event summary headline-like start
-        if title_similarity(article.title, event.summary[:120]) >= EVENT_MATCH_THRESHOLD:
+        if title_similarity(signal.title, event.summary[:120]) >= EVENT_MATCH_THRESHOLD:
             return event.id
     for event in candidates:
         if normalize_title(event.summary[:80]) == norm[:80]:
@@ -125,25 +121,58 @@ def _match_event(
     return None
 
 
-def _article_tickers(article: RawArticle, watchlist: list[str]) -> list[str]:
-    hints = list(article.tickers_hint)
-    extracted = extract_tickers(f"{article.title} {article.snippet}", known=watchlist)
+def _signal_tickers(signal: Signal, watchlist: list[str]) -> list[str]:
+    hints = list(signal.tickers_hint)
+    extracted = extract_tickers(f"{signal.title} {signal.snippet}", known=watchlist)
     return list(dict.fromkeys(hints + extracted))
+
+
+def _log_event_enrichment(
+    log: CycleLog,
+    event_id: str,
+    event_signals: list[Signal],
+    enriched: EnrichedEvent,
+    *,
+    parsed_ok: bool,
+    importance: int,
+    confidence: float,
+) -> None:
+    """Write LLM enrichment details to the news cycle log."""
+    log.line(f"Event {event_id[:8]} ({len(event_signals)} article(s)):")
+    for sig in event_signals:
+        log.line(f"  • [{sig.source}] {truncate_text(sig.title, 120)}")
+    if parsed_ok:
+        log.line(
+            f"  LLM → type={enriched.event_type} sentiment={enriched.sentiment} "
+            f"importance={importance} confidence={confidence:.2f} "
+            f"tickers={', '.join(enriched.tickers) or '—'}"
+        )
+        log.line(f"  Summary: {truncate_text(enriched.summary, 300)}")
+    else:
+        logger.warning(
+            "LLM unparseable JSON for event %s; headline fallback → "
+            "type=%s sentiment=%s importance=%d confidence=%.2f",
+            event_id[:8],
+            enriched.event_type,
+            enriched.sentiment,
+            importance,
+            confidence,
+        )
 
 
 async def _enrich_event(
     llm: OllamaClient,
-    articles: list[RawArticle],
-) -> EnrichedEvent:
+    signals: list[Signal],
+) -> tuple[EnrichedEvent, bool]:
     lines = []
-    for i, art in enumerate(articles, 1):
-        lines.append(f"Article {i}:")
-        lines.append(f"  Title: {art.title}")
-        lines.append(f"  Source: {art.source}")
-        lines.append(f"  Snippet: {art.snippet[:300]}")
+    for i, sig in enumerate(signals, 1):
+        lines.append(f"Signal {i}:")
+        lines.append(f"  Title: {sig.title}")
+        lines.append(f"  Source: {sig.source} (weight: {sig.weight:.2f})")
+        lines.append(f"  Snippet: {sig.snippet[:300]}")
         lines.append("")
 
-    user_prompt = "Analyze these related articles:\n\n" + "\n".join(lines)
+    user_prompt = "Analyze these related signals:\n\n" + "\n".join(lines)
 
     response = await llm.chat(
         [
@@ -155,103 +184,121 @@ async def _enrich_event(
     content = response.content or ""
     enriched = _parse_enrichment(content)
     if enriched and enriched.summary:
-        return enriched
+        return enriched, True
 
-    # Fallback without LLM parse
-    title = articles[0].title if articles else "Unknown event"
-    tickers = _article_tickers(articles[0], []) if articles else []
-    return EnrichedEvent(
-        summary=title,
-        event_type="other",
-        sentiment="neutral",
-        importance=2,
-        confidence=0.3,
-        tickers=tickers,
-        companies=[],
+    title = signals[0].title if signals else "Unknown event"
+    tickers = _signal_tickers(signals[0], []) if signals else []
+    return (
+        EnrichedEvent(
+            summary=title,
+            event_type="other",
+            sentiment="neutral",
+            importance=2,
+            confidence=0.3,
+            tickers=tickers,
+            companies=[],
+        ),
+        False,
     )
 
 
-async def process_articles(
+async def process_signals(
     settings: Settings,
-    articles: list[RawArticle],
+    signals: list[Signal],
     llm: OllamaClient,
+    watchlist: list[str],
+    log: CycleLog,
 ) -> dict[str, int]:
-    """Ingest new articles: dedupe, group, enrich, persist. Returns stats."""
+    """Ingest new signals: dedupe, group, enrich, persist. Returns stats."""
     db_path = settings.event_store_path
-    watchlist = [
-        s.strip().upper()
-        for s in settings.watchlist_tickers.split(",")
-        if s.strip()
-    ]
 
-    stats = {"fetched": len(articles), "new": 0, "skipped": 0, "updated_events": 0}
+    stats = {"fetched": len(signals), "new": 0, "skipped": 0, "updated_events": 0}
 
-    events_to_enrich: dict[str, list[RawArticle]] = {}
+    if signals:
+        log.section("Enrichment")
 
-    for article in articles:
-        h = url_hash(article.url)
+    events_to_enrich: dict[str, list[Signal]] = {}
+    enrichment_logged = False
+
+    for signal in signals:
+        h = url_hash(signal.url)
         if article_exists(db_path, h):
             stats["skipped"] += 1
             continue
 
-        tickers = _article_tickers(article, watchlist)
+        tickers = _signal_tickers(signal, watchlist)
         candidates = find_candidate_events(db_path, tickers, since_hours=48)
 
-        event_id = _match_event(article, candidates)
-        if event_id is None and candidates:
-            # Try broader match on any candidate with overlapping tickers
-            for event in candidates:
-                if title_similarity(article.title, event.summary) >= HEADLINE_MATCH_THRESHOLD:
-                    event_id = event.id
-                    break
+        event_id = _match_event(signal, candidates)
 
         if event_id is None:
             event_id = create_event(
                 db_path,
-                summary=article.title,
+                summary=signal.title,
                 tickers=tickers,
-                first_seen_at=article.published_at or _utcnow(),
-                last_seen_at=article.published_at or _utcnow(),
+                first_seen_at=signal.published_at or utcnow(),
+                last_seen_at=signal.published_at or utcnow(),
             )
 
         insert_article(
             db_path,
-            url=article.url,
+            url=signal.url,
             url_hash=h,
-            title=article.title,
-            source=article.source,
-            snippet=article.snippet,
+            title=signal.title,
+            source=signal.source,
+            snippet=signal.snippet,
             event_id=event_id,
-            published_at=article.published_at,
+            published_at=signal.published_at,
+            weight=signal.weight,
         )
         stats["new"] += 1
+        log.line(
+            f"New → event {event_id[:8]} [{signal.source}] "
+            f"{truncate_text(signal.title, 120)}"
+        )
 
         stored = get_event_articles(db_path, event_id)
-        # Reconstruct RawArticle list for enrichment from DB + current
         raw_for_event = [
-            RawArticle(
+            Signal(
                 url=a.url,
                 title=a.title,
                 source=a.source,
                 published_at=a.published_at,
                 snippet=a.snippet,
+                weight=a.weight,
             )
             for a in stored
         ]
         events_to_enrich[event_id] = raw_for_event
 
     enriched_count = 0
-    for event_id, event_articles in events_to_enrich.items():
+    for event_id, event_signals in events_to_enrich.items():
         if enriched_count >= MAX_ENRICHMENTS_PER_CYCLE:
-            logger.info(
-                "Enrichment cap reached (%d); remaining events keep stub summaries",
-                MAX_ENRICHMENTS_PER_CYCLE,
-            )
+            if not enrichment_logged:
+                log.line(
+                    f"Enrichment cap reached ({MAX_ENRICHMENTS_PER_CYCLE}); "
+                    "remaining events keep stub summaries"
+                )
+                enrichment_logged = True
             break
-        enriched = await _enrich_event(llm, event_articles)
+        enriched, parsed_ok = await _enrich_event(llm, event_signals)
+        importance, confidence = apply_weighted_scores(
+            event_signals,
+            importance=enriched.importance,
+            confidence=enriched.confidence,
+        )
+        _log_event_enrichment(
+            log,
+            event_id,
+            event_signals,
+            enriched,
+            parsed_ok=parsed_ok,
+            importance=importance,
+            confidence=confidence,
+        )
         last_seen = max(
-            (a.published_at or _utcnow() for a in event_articles),
-            default=_utcnow(),
+            (s.published_at or utcnow() for s in event_signals),
+            default=utcnow(),
         )
         update_event(
             db_path,
@@ -259,11 +306,11 @@ async def process_articles(
             summary=enriched.summary,
             event_type=enriched.event_type,
             sentiment=enriched.sentiment,
-            importance=enriched.importance,
-            confidence=enriched.confidence,
+            importance=importance,
+            confidence=confidence,
             tickers=enriched.tickers,
             companies=enriched.companies,
-            article_count=len(event_articles),
+            article_count=len(event_signals),
             last_seen_at=last_seen,
         )
         stats["updated_events"] += 1

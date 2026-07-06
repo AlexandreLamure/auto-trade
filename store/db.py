@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from news.weights import UNKNOWN_SOURCE_WEIGHT
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
@@ -42,8 +44,17 @@ CREATE INDEX IF NOT EXISTS idx_events_last_seen ON events(last_seen_at);
 """
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "weight" not in cols:
+        conn.execute(
+            f"ALTER TABLE articles ADD COLUMN weight REAL NOT NULL DEFAULT {UNKNOWN_SOURCE_WEIGHT}"
+        )
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
+    _migrate_schema(conn)
     conn.commit()
 
 

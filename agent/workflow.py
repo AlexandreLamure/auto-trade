@@ -12,6 +12,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def truncate_text(text: str, limit: int = 3000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n… [truncated]"
+
+
 def parse_mcp_json(text: str) -> Any:
     try:
         return json.loads(text)
@@ -82,12 +88,9 @@ async def call_mcp_tool(
     name: str,
     arguments: dict[str, Any] | None = None,
     tool_call_log: list[dict[str, Any]] | None = None,
-    *,
-    result_truncate: int = 8000,
 ) -> str:
     """Execute one MCP tool and optionally append to *tool_call_log*."""
     args = arguments or {}
-    logger.info("MCP tool: %s(%s)", name, args)
     try:
         result = await manager.call_tool(name, args)
         result_text = manager.result_to_text(result)
@@ -96,10 +99,71 @@ async def call_mcp_tool(
         logger.warning(result_text)
 
     if tool_call_log is not None:
-        tool_call_log.append(
-            {"name": name, "args": args, "result": result_text[:result_truncate]}
-        )
+        tool_call_log.append({"name": name, "args": args, "result": result_text})
     return result_text
+
+
+def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str:
+    """One-line human-readable summary of an MCP tool call."""
+    if result_text.startswith("ERROR"):
+        return f"{name} → {truncate_text(result_text, 200)}"
+
+    raw = parse_mcp_json(result_text)
+    payload = unwrap_alpaca_payload(raw) if raw is not None else None
+
+    if name == "get_account_info" and isinstance(payload, dict):
+        cash = parse_float_field(payload.get("cash") or payload.get("buying_power"))
+        equity = parse_float_field(payload.get("equity") or payload.get("portfolio_value"))
+        return f"get_account(cash=${cash:,.2f}, equity=${equity:,.2f})"
+
+    if name == "get_all_positions":
+        positions = _iter_positions(payload)
+        if not positions:
+            return "get_positions(0 positions)"
+        detail = ", ".join(f"{symbol} {qty:g}" for symbol, qty in positions)
+        return f"get_positions({len(positions)}): {detail}"
+
+    if name == "get_stock_bars":
+        symbols = args.get("symbols", "")
+        prices = parse_latest_prices(result_text)
+        if prices:
+            price_str = ", ".join(f"{s} ${p:.2f}" for s, p in list(prices.items())[:6])
+            return f"get_stock_bars({symbols}) → {price_str}"
+        return f"get_stock_bars({symbols})"
+
+    if name == "get_market_movers":
+        syms = extract_mover_symbols(result_text, n=5)
+        return f"get_market_movers → {', '.join(syms) or 'none'}"
+
+    if name == "place_stock_order":
+        return f"place_stock_order({args}) → {truncate_text(result_text, 150)}"
+
+    arg_str = ", ".join(f"{k}={v}" for k, v in args.items()) if args else ""
+    label = f"{name}({arg_str})" if arg_str else name
+    return f"{label} → {truncate_text(result_text, 150)}"
+
+
+def _iter_positions(payload: Any) -> list[tuple[str, float]]:
+    """Return (symbol, quantity) pairs from an Alpaca positions payload."""
+    if isinstance(payload, list):
+        positions = payload
+    elif isinstance(payload, dict):
+        positions = payload.get("result") or payload.get("positions") or []
+    else:
+        return []
+    if not isinstance(positions, list):
+        return []
+
+    held: list[tuple[str, float]] = []
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        symbol = str(pos.get("symbol", "")).upper().strip()
+        if not symbol:
+            continue
+        qty = parse_float_field(pos.get("qty") or pos.get("quantity"))
+        held.append((symbol, qty))
+    return held
 
 
 def extract_position_symbols(positions_result: str) -> list[str]:
@@ -107,26 +171,7 @@ def extract_position_symbols(positions_result: str) -> list[str]:
     raw = parse_mcp_json(positions_result)
     if raw is None:
         return []
-
-    payload = unwrap_alpaca_payload(raw)
-    if isinstance(payload, list):
-        positions = payload
-    elif isinstance(payload, dict):
-        positions = payload.get("result") or payload.get("positions") or []
-    else:
-        return []
-
-    if not isinstance(positions, list):
-        return []
-
-    symbols: list[str] = []
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        symbol = str(pos.get("symbol", "")).upper().strip()
-        if symbol:
-            symbols.append(symbol)
-    return symbols
+    return [symbol for symbol, _ in _iter_positions(unwrap_alpaca_payload(raw))]
 
 
 def merge_symbol_universe(

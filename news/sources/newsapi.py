@@ -6,8 +6,9 @@ import logging
 
 import httpx
 
-from news.models import RawArticle
-from news.sources.base import extract_tickers, parse_published
+from news.models import Signal
+from news.sources.base import parse_published
+from news.sources.http_helpers import api_item_to_signal, valid_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +27,8 @@ async def fetch_newsapi(
     api_key: str,
     *,
     watchlist_tickers: list[str] | None = None,
-) -> list[RawArticle]:
-    if not api_key or api_key.startswith("your_"):
+) -> list[Signal]:
+    if not valid_api_key(api_key):
         return []
 
     watchlist = watchlist_tickers or []
@@ -35,7 +36,7 @@ async def fetch_newsapi(
     for sym in watchlist[:5]:
         queries.append(f"{sym} stock")
 
-    articles: list[RawArticle] = []
+    articles: list[Signal] = []
     async with httpx.AsyncClient(timeout=15) as client:
         for query in queries:
             params = {
@@ -54,24 +55,15 @@ async def fetch_newsapi(
                 continue
 
             for item in data.get("articles", []):
-                url = item.get("url") or ""
-                if not url:
-                    continue
-                title = (item.get("title") or "").strip()
-                description = (item.get("description") or "").strip()
                 source_name = (item.get("source") or {}).get("name") or "newsapi"
-                published = parse_published(item.get("publishedAt"))
-                snippet = description or title
-                tickers = extract_tickers(f"{title} {snippet}", known=watchlist)
-
-                articles.append(
-                    RawArticle(
-                        url=url,
-                        title=title,
-                        source=f"api:newsapi:{source_name}",
-                        published_at=published,
-                        snippet=snippet[:500],
-                        tickers_hint=tickers,
-                    )
+                signal = api_item_to_signal(
+                    url=item.get("url") or "",
+                    title=item.get("title") or "",
+                    snippet=item.get("description") or "",
+                    published=parse_published(item.get("publishedAt")),
+                    source_label=f"api:newsapi:{source_name}",
+                    watchlist=watchlist,
                 )
+                if signal:
+                    articles.append(signal)
     return articles
