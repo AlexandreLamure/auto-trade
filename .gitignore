@@ -5,3 +5,4 @@ logs/*.log
 __pycache__/
 *.pyc
 .cursor/
+runs.jsonl
