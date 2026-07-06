@@ -1,8 +1,30 @@
+# Secrets and local config
 .env
+.env.*
+!.env.example
+
+# Virtual environment
 .venv/
+
+# Runtime data
 data/
-logs/*.log
+logs/*
+!logs/.gitkeep
+runs.jsonl
+
+# Python
 __pycache__/
 *.pyc
+
+# IDE / editor
 .cursor/
-runs.jsonl
+
+# Keys and certs
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases (data/ covers events.db; catch stray copies)
+*.sqlite
+*.sqlite3

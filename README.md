@@ -72,7 +72,10 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -r requirements.txt
+pre-commit install
 ```
+
+This installs a **gitleaks** pre-commit hook that scans every commit for secrets (API keys, tokens, etc.) before it lands in git.
 
 ### 2. Configure environment variables
 

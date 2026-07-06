@@ -1,0 +1,12 @@
+title = "auto-trade gitleaks config"
+
+[allowlist]
+description = "Known false positives and intentional placeholders"
+paths = [
+  '''\.env\.example$''',
+]
+regexes = [
+  '''api_key\s*=\s*["']ollama["']''',
+  '''your_[a-z_]+_here''',
+  '''contact@example\.com''',
+]
