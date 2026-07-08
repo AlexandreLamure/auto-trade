@@ -64,10 +64,15 @@ def _market_to_signal(market: dict, watchlist: list[str]) -> Signal | None:
 
     end_date = market.get("endDate") or market.get("endDateIso")
     published = parse_published(end_date) if isinstance(end_date, str) else None
-    if published is None:
-        published = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    if published is None or published > now:
+        published = now
 
     tickers = extract_tickers(f"{question} {snippet}", known=watchlist)
+    if not tickers:
+        return None
+    if watchlist and not any(t in {s.upper() for s in watchlist} for t in tickers):
+        return None
     url = f"https://polymarket.com/event/{slug}"
 
     return Signal(

@@ -20,7 +20,7 @@ from agent.llm_client import OllamaClient
 from agent.decision import PortfolioDecision, TradeOrder
 from agent.workflow import format_mcp_summary, is_market_open, truncate_text
 from agent.deliberation import run_committee
-from agent.research import ResearchBrief, run_deep_research
+from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import build_validation_context, validate_orders
 from store import MarketEvent
 from util.cycle_log import CycleLog, get_trading_log
@@ -79,6 +79,12 @@ class AgentOrchestrator:
             cycle_log=log,
         )
         _log_decision(portfolio_decision, log)
+
+        order_symbols = [o.symbol for o in portfolio_decision.orders]
+        if order_symbols:
+            brief = await enrich_brief_prices(
+                manager, brief, order_symbols, self._settings
+            )
 
         ctx = build_validation_context(
             self._settings,

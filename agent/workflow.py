@@ -269,3 +269,94 @@ def parse_latest_prices(bars_json: str) -> dict[str, float]:
         if close > 0:
             prices[str(symbol).upper()] = close
     return prices
+
+
+def parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
+    """Return OHLCV bar lists keyed by symbol from get_stock_bars JSON."""
+    raw = parse_mcp_json(bars_json)
+    if raw is None:
+        return {}
+    payload = unwrap_alpaca_payload(raw)
+    if not isinstance(payload, dict):
+        return {}
+    bars_by_symbol = payload.get("bars") or {}
+    if not isinstance(bars_by_symbol, dict):
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    for symbol, bars in bars_by_symbol.items():
+        if isinstance(bars, list):
+            result[str(symbol).upper()] = [b for b in bars if isinstance(b, dict)]
+    return result
+
+
+def compute_price_analytics(bars_json: str) -> tuple[str, dict[str, dict[str, float]]]:
+    """Build a compact markdown table and per-symbol metrics from bar data."""
+    bars_by_symbol = parse_bars_by_symbol(bars_json)
+    if not bars_by_symbol:
+        return "_No price analytics available._", {}
+
+    lines = [
+        "| Symbol | Price | 1d% | 5d% | 20d% | vs 30d High | Vol×Avg |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    metrics: dict[str, dict[str, float]] = {}
+
+    for symbol in sorted(bars_by_symbol):
+        bars = bars_by_symbol[symbol]
+        if len(bars) < 2:
+            continue
+
+        closes = [parse_float_field(b.get("c") or b.get("close")) for b in bars]
+        volumes = [parse_float_field(b.get("v") or b.get("volume")) for b in bars]
+        price = closes[-1]
+        if price <= 0:
+            continue
+
+        ret_1d = ((closes[-1] / closes[-2]) - 1.0) * 100.0 if len(closes) >= 2 else 0.0
+        ret_5d = ((closes[-1] / closes[-6]) - 1.0) * 100.0 if len(closes) >= 6 else 0.0
+        ret_20d = ((closes[-1] / closes[-21]) - 1.0) * 100.0 if len(closes) >= 21 else 0.0
+        high_30 = max(closes)
+        dist_high = ((price / high_30) - 1.0) * 100.0 if high_30 > 0 else 0.0
+        recent_vols = volumes[-20:] or volumes
+        vol_avg = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
+        vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1.0
+
+        metrics[symbol] = {
+            "price": price,
+            "ret_1d": ret_1d,
+            "ret_5d": ret_5d,
+            "ret_20d": ret_20d,
+            "dist_high": dist_high,
+            "vol_ratio": vol_ratio,
+        }
+        lines.append(
+            f"| {symbol} | ${price:.2f} | {ret_1d:+.1f}% | {ret_5d:+.1f}% | "
+            f"{ret_20d:+.1f}% | {dist_high:+.1f}% | {vol_ratio:.1f}x |"
+        )
+
+    if len(lines) <= 2:
+        return "_No price analytics available._", {}
+    return "\n".join(lines), metrics
+
+
+def expand_symbol_universe(
+    held: list[str],
+    movers: list[str],
+    event_tickers: list[str],
+    *,
+    max_candidates: int,
+) -> tuple[list[str], list[str]]:
+    """Merge held, movers, and event-discovered tickers into a research universe."""
+    held_unique, candidates = merge_symbol_universe(
+        held, movers, max_candidates=max_candidates
+    )
+    seen = set(held_unique) | set(candidates)
+    for symbol in event_tickers:
+        sym = symbol.upper()
+        if sym in seen:
+            continue
+        candidates.append(sym)
+        seen.add(sym)
+        if len(candidates) >= max_candidates:
+            break
+    return held_unique, candidates

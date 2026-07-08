@@ -7,7 +7,7 @@ from news.weights import parse_source_weights
 
 _SOURCE_WEIGHTS_DEFAULT = (
     '{"sec_edgar":1.0,"company_ir":1.0,"rss":0.9,"api":0.8,'
-    '"polymarket":0.6,"reddit":0.5,"stocktwits":0.4,"google_trends":0.3}'
+    '"polymarket":0.3,"reddit":0.5,"stocktwits":0.4,"google_trends":0.3}'
 )
 
 
@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     events_limit: int = Field(30, description="Max symbol-specific events per cycle")
     macro_events_min_importance: int = Field(4, description="Min importance for macro events")
     macro_events_limit: int = Field(10, description="Max macro events per cycle")
+    event_ttl_days: int = Field(30, description="Delete events older than this many days")
+    event_discovery_limit: int = Field(
+        6, description="Max symbols to add from high-importance events"
+    )
 
     # Risk guard
     max_position_pct: float = Field(

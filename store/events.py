@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -105,6 +106,47 @@ def article_exists(db_path: str, url_hash: str) -> bool:
         return row is not None
 
 
+def find_article_event_id(db_path: str, url_hash: str) -> str | None:
+    """Return the parent event id for an existing article URL hash."""
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT event_id FROM articles WHERE url_hash = ? LIMIT 1",
+            (url_hash,),
+        ).fetchone()
+        return str(row["event_id"]) if row else None
+
+
+def touch_event_seen(
+    db_path: str,
+    event_id: str,
+    *,
+    seen_at: datetime | None = None,
+) -> None:
+    """Bump last_seen_at when a duplicate article URL is re-ingested."""
+    when = seen_at or utcnow()
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE events
+            SET last_seen_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (to_iso(when), to_iso(utcnow()), event_id),
+        )
+        conn.commit()
+
+
+def _sync_event_tickers(conn: sqlite3.Connection, event_id: str, tickers: list[str]) -> None:
+    conn.execute("DELETE FROM event_tickers WHERE event_id = ?", (event_id,))
+    for ticker in tickers:
+        sym = str(ticker).upper().strip()
+        if sym:
+            conn.execute(
+                "INSERT OR IGNORE INTO event_tickers (event_id, ticker) VALUES (?, ?)",
+                (event_id, sym),
+            )
+
+
 def create_event(
     db_path: str,
     *,
@@ -151,6 +193,7 @@ def create_event(
                 to_iso(now),
             ),
         )
+        _sync_event_tickers(conn, event_id, tickers)
         conn.commit()
     return event_id
 
@@ -212,6 +255,8 @@ def update_event(
             f"UPDATE events SET {', '.join(fields)} WHERE id = ?",
             values,
         )
+        if tickers is not None:
+            _sync_event_tickers(conn, event_id, tickers)
         conn.commit()
 
 
@@ -278,33 +323,41 @@ def _query_events(
         if order_by_importance
         else "last_seen_at DESC"
     )
-    fetch_limit = limit * 3 if tickers and order_by_importance else limit
+    stub_filter = "AND NOT (event_type = 'unknown' AND article_count = 0)"
 
+    if tickers:
+        placeholders = ",".join("?" for _ in tickers)
+        params: list[Any] = [cutoff, min_importance, *sorted(tickers), limit]
+        sql = f"""
+            SELECT DISTINCT e.*
+            FROM events e
+            INNER JOIN event_tickers et ON et.event_id = e.id
+            WHERE e.last_seen_at >= ?
+              AND e.importance >= ?
+              AND et.ticker IN ({placeholders})
+              {stub_filter}
+            ORDER BY e.importance DESC, e.last_seen_at DESC
+            LIMIT ?
+        """
+        with get_connection(db_path) as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [MarketEvent.from_row(row) for row in rows]
+
+    fetch_limit = limit
     with get_connection(db_path) as conn:
         rows = conn.execute(
             f"""
             SELECT * FROM events
             WHERE last_seen_at >= ?
               AND importance >= ?
+              {stub_filter}
             ORDER BY {order_clause}
             LIMIT ?
             """,
             (cutoff, min_importance, fetch_limit),
         ).fetchall()
 
-    events = [MarketEvent.from_row(row) for row in rows]
-
-    if not tickers:
-        return events[:limit]
-
-    matched: list[MarketEvent] = []
-    for event in events:
-        event_tickers = {t.upper() for t in event.tickers}
-        if event_tickers & tickers:
-            matched.append(event)
-        if len(matched) >= limit:
-            break
-    return matched
+    return [MarketEvent.from_row(row) for row in rows]
 
 
 def find_candidate_events(
@@ -348,3 +401,90 @@ def count_events(db_path: str) -> int:
     with get_connection(db_path) as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
         return int(row["n"]) if row else 0
+
+
+def discover_event_tickers(
+    db_path: str,
+    *,
+    since_hours: int = 72,
+    min_importance: int = 2,
+    limit: int = 20,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    """Return tickers from recent high-importance enriched events."""
+    exclude = exclude or set()
+    cutoff = to_iso(utcnow() - timedelta(hours=since_hours))
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT et.ticker, MAX(e.importance) AS imp, MAX(e.last_seen_at) AS seen
+            FROM event_tickers et
+            INNER JOIN events e ON e.id = et.event_id
+            WHERE e.last_seen_at >= ?
+              AND e.importance >= ?
+              AND NOT (e.event_type = 'unknown' AND e.article_count = 0)
+            GROUP BY et.ticker
+            ORDER BY imp DESC, seen DESC
+            LIMIT ?
+            """,
+            (cutoff, min_importance, limit * 3),
+        ).fetchall()
+
+    discovered: list[str] = []
+    seen = set(exclude)
+    for row in rows:
+        sym = str(row["ticker"]).upper()
+        if sym in seen:
+            continue
+        seen.add(sym)
+        discovered.append(sym)
+        if len(discovered) >= limit:
+            break
+    return discovered
+
+
+def find_unenriched_events(db_path: str, *, limit: int = 50) -> list[str]:
+    """Return event ids with articles but stub metadata."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT e.id
+            FROM events e
+            WHERE e.event_type = 'unknown'
+              AND e.article_count > 0
+            ORDER BY e.last_seen_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def prune_old_events(db_path: str, *, ttl_days: int = 30) -> int:
+    """Delete events older than ttl_days. Returns number of events removed."""
+    if ttl_days <= 0:
+        return 0
+    cutoff = to_iso(utcnow() - timedelta(days=ttl_days))
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id FROM events WHERE last_seen_at < ?",
+            (cutoff,),
+        ).fetchall()
+        event_ids = [str(row["id"]) for row in rows]
+        if not event_ids:
+            return 0
+        placeholders = ",".join("?" for _ in event_ids)
+        conn.execute(
+            f"DELETE FROM articles WHERE event_id IN ({placeholders})",
+            event_ids,
+        )
+        conn.execute(
+            f"DELETE FROM event_tickers WHERE event_id IN ({placeholders})",
+            event_ids,
+        )
+        conn.execute(
+            f"DELETE FROM events WHERE id IN ({placeholders})",
+            event_ids,
+        )
+        conn.commit()
+    return len(event_ids)

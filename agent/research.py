@@ -11,7 +11,7 @@ from the shared event store (populated by the news analysis service).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,8 @@ from servers.manager import MCPManager
 from agent.personas import HORIZON_DAYS
 from agent.workflow import (
     call_mcp_tool,
+    compute_price_analytics,
+    expand_symbol_universe,
     extract_mover_symbols,
     extract_position_symbols,
     merge_symbol_universe,
@@ -30,7 +32,14 @@ from agent.workflow import (
     truncate_text,
     unwrap_alpaca_payload,
 )
-from store import MarketEvent, init_db, query_events
+from store import (
+    MarketEvent,
+    StoredArticle,
+    discover_event_tickers,
+    get_event_articles,
+    init_db,
+    query_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +55,37 @@ class ResearchBrief:
     month_pnl_pct: float | None
     latest_prices: dict[str, float]
     summary_markdown: str
+    price_analytics_markdown: str = ""
+    events_markdown: str = ""
     raw_sections: dict[str, str] = field(default_factory=dict)
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
     market_events: list[MarketEvent] = field(default_factory=list)
 
     def to_prompt_context(self) -> str:
         return self.summary_markdown
+
+    def debate_context(self) -> str:
+        """Abbreviated but evidence-rich context for Round 2 debate."""
+        pnl = (
+            f"{self.month_pnl_pct:+.2f}%"
+            if self.month_pnl_pct is not None
+            else "unavailable"
+        )
+        lines = [
+            "## Portfolio",
+            f"- Equity: ${self.portfolio_equity:,.2f} | Cash: ${self.cash_available:,.2f}",
+            f"- Month PnL: {pnl}",
+            f"- Holdings: {', '.join(self.held_symbols) or 'none'}",
+            f"- Candidates: {', '.join(self.candidate_symbols) or 'none'}",
+            "",
+        ]
+        if self.price_analytics_markdown.strip():
+            lines.extend(["## Price analytics", "", self.price_analytics_markdown, ""])
+        if self.events_markdown.strip():
+            lines.extend(
+                ["## Market events", "", truncate_text(self.events_markdown, 4000), ""]
+            )
+        return "\n".join(lines)
 
 
 def _parse_account_cash(account_json: str) -> tuple[float, float]:
@@ -88,21 +122,33 @@ def _parse_month_pnl(history_json: str) -> float | None:
         return None
     return ((end - start) / abs(start)) * 100.0
 
-def _format_event(event: MarketEvent) -> str:
+
+def _format_event(event: MarketEvent, articles: list[StoredArticle]) -> str:
     tickers = ", ".join(event.tickers) if event.tickers else "—"
     companies = ", ".join(event.companies) if event.companies else "—"
     updated = event.last_seen_at.strftime("%Y-%m-%d %H:%M UTC")
-    return (
-        f"### {event.summary[:120]}{'…' if len(event.summary) > 120 else ''}\n"
+    lines = [
+        f"### {event.summary[:120]}{'…' if len(event.summary) > 120 else ''}",
         f"- Type: {event.event_type} | Sentiment: {event.sentiment} | "
-        f"Importance: {event.importance}/5 | Confidence: {event.confidence:.0%}\n"
-        f"- Tickers: {tickers} | Companies: {companies}\n"
-        f"- Articles: {event.article_count} | Last updated: {updated}\n"
-        f"- Summary: {truncate_text(event.summary, 800)}"
-    )
+        f"Importance: {event.importance}/5 | Confidence: {event.confidence:.0%}",
+        f"- Tickers: {tickers} | Companies: {companies}",
+        f"- Articles: {event.article_count} | Last updated: {updated}",
+        f"- Summary: {truncate_text(event.summary, 800)}",
+    ]
+    if articles:
+        lines.append("- Sources:")
+        for article in articles[:2]:
+            lines.append(
+                f"  - [{article.source}, w={article.weight:.2f}] "
+                f"{truncate_text(article.title, 100)}"
+            )
+    return "\n".join(lines)
 
 
-def load_market_events(symbols: list[str], settings: Settings) -> tuple[str, list[MarketEvent]]:
+def load_market_events(
+    symbols: list[str],
+    settings: Settings,
+) -> tuple[str, list[MarketEvent]]:
     """Query the event store for symbol-specific and macro events."""
     db_path = settings.event_store_path
     path = Path(db_path)
@@ -135,7 +181,6 @@ def load_market_events(symbols: list[str], settings: Settings) -> tuple[str, lis
         limit=settings.macro_events_limit,
     )
 
-    # Deduplicate: macro query may overlap symbol events
     seen_ids = {e.id for e in symbol_events}
     macro_only = [e for e in macro_events if e.id not in seen_ids]
 
@@ -143,13 +188,15 @@ def load_market_events(symbols: list[str], settings: Settings) -> tuple[str, lis
     if macro_only:
         lines.append("### Macro / broad market")
         for event in macro_only:
-            lines.append(_format_event(event))
+            articles = get_event_articles(db_path, event.id)
+            lines.append(_format_event(event, articles))
             lines.append("")
 
     if symbol_events:
         lines.append("### Symbol-specific events")
         for event in symbol_events:
-            lines.append(_format_event(event))
+            articles = get_event_articles(db_path, event.id)
+            lines.append(_format_event(event, articles))
             lines.append("")
 
     if not lines:
@@ -158,6 +205,20 @@ def load_market_events(symbols: list[str], settings: Settings) -> tuple[str, lis
     body = "\n".join(lines)
     all_events = symbol_events + macro_only
     return body, all_events
+
+
+def _discover_symbols_from_events(settings: Settings, held: list[str]) -> list[str]:
+    path = Path(settings.event_store_path)
+    if not path.exists():
+        return []
+    init_db(settings.event_store_path)
+    return discover_event_tickers(
+        settings.event_store_path,
+        since_hours=settings.events_since_hours,
+        min_importance=settings.events_min_importance,
+        limit=settings.event_discovery_limit,
+        exclude=set(held),
+    )
 
 
 def _build_summary(
@@ -185,12 +246,12 @@ def _build_summary(
     ]
 
     section_titles = {
+        "price_analytics": "Price analytics",
         "account": "Account",
         "positions": "Open positions",
         "portfolio_history": f"Portfolio history ({HORIZON_DAYS}d)",
         "orders": "Recent orders",
         "movers": "Market movers",
-        "bars": f"{HORIZON_DAYS}-day price bars",
         "market_events": "Market events",
     }
     for key, title in section_titles.items():
@@ -209,6 +270,7 @@ async def run_deep_research(
     log: list[dict[str, Any]] = []
     sections: dict[str, str] = {}
     latest_prices: dict[str, float] = {}
+    price_analytics_markdown = ""
 
     account = await call_mcp_tool(manager, "get_account_info", tool_call_log=log)
     sections["account"] = account
@@ -244,9 +306,11 @@ async def run_deep_research(
     sections["movers"] = movers
     mover_symbols = extract_mover_symbols(movers, n=settings.research_symbol_count)
 
-    held, candidates = merge_symbol_universe(
+    event_tickers = _discover_symbols_from_events(settings, held)
+    held, candidates = expand_symbol_universe(
         held,
         mover_symbols,
+        event_tickers,
         max_candidates=settings.research_symbol_count,
     )
     all_symbols = list(dict.fromkeys(held + candidates))
@@ -263,8 +327,9 @@ async def run_deep_research(
             },
             tool_call_log=log,
         )
-        sections["bars"] = bars
         latest_prices = parse_latest_prices(bars)
+        price_analytics_markdown, _metrics = compute_price_analytics(bars)
+        sections["price_analytics"] = price_analytics_markdown
 
     events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
@@ -288,7 +353,56 @@ async def run_deep_research(
         month_pnl_pct=month_pnl_pct,
         latest_prices=latest_prices,
         summary_markdown=summary,
+        price_analytics_markdown=price_analytics_markdown,
+        events_markdown=events_text,
         raw_sections=sections,
         tool_call_log=log,
         market_events=market_events,
+    )
+
+
+async def enrich_brief_prices(
+    manager: MCPManager,
+    brief: ResearchBrief,
+    symbols: list[str],
+    settings: Settings,
+) -> ResearchBrief:
+    """Fetch bar data for symbols missing from the research universe (chair verify)."""
+    missing = list(
+        dict.fromkeys(s.upper() for s in symbols if s.upper() not in brief.latest_prices)
+    )
+    if not missing:
+        return brief
+
+    bars = await call_mcp_tool(
+        manager,
+        "get_stock_bars",
+        {
+            "symbols": ",".join(missing),
+            "timeframe": "1Day",
+            "days": HORIZON_DAYS,
+            "feed": "iex",
+        },
+        tool_call_log=brief.tool_call_log,
+    )
+    new_prices = parse_latest_prices(bars)
+    extra_analytics, _ = compute_price_analytics(bars)
+
+    updated_prices = {**brief.latest_prices, **new_prices}
+    combined_analytics = brief.price_analytics_markdown
+    if extra_analytics and "No price analytics" not in extra_analytics:
+        combined_analytics = (
+            f"{combined_analytics}\n\n### Additional symbols\n{extra_analytics}".strip()
+        )
+
+    all_symbols = list(dict.fromkeys(brief.all_symbols + missing))
+    sections = dict(brief.raw_sections)
+    sections["price_analytics"] = combined_analytics
+
+    return replace(
+        brief,
+        all_symbols=all_symbols,
+        latest_prices=updated_prices,
+        price_analytics_markdown=combined_analytics,
+        raw_sections=sections,
     )

@@ -141,8 +141,7 @@ Do not retreat to HOLD just because others disagree — defend your thesis with 
 {_sizing_hint(brief, max_position_pct)}
 
 ## Research brief (summary)
-Holdings: {", ".join(brief.held_symbols) or "none"}
-Candidates: {", ".join(brief.candidate_symbols) or "none"}
+{brief.debate_context()}
 
 ## Round 1 proposals
 {proposal_text}"""

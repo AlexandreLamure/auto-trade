@@ -10,7 +10,7 @@ from config.settings import Settings
 from news.analyzer import process_signals
 from news.collector import collect_signals
 from news.watchlist import resolve_watchlist
-from store import count_events, init_db
+from store import count_events, init_db, prune_old_events
 from util.cycle_log import get_news_log
 
 
@@ -22,6 +22,9 @@ async def run_cycle(settings: Settings) -> dict[str, int]:
     log.start_cycle(f"NEWS CYCLE {started_at}")
 
     init_db(settings.event_store_path)
+    pruned = prune_old_events(settings.event_store_path, ttl_days=settings.event_ttl_days)
+    if pruned:
+        log.line(f"Pruned {pruned} events older than {settings.event_ttl_days}d")
 
     llm = OllamaClient(
         base_url=settings.ollama_base_url,

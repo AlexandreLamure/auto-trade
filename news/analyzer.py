@@ -18,11 +18,13 @@ from news.sources.base import (
 from agent.workflow import truncate_text
 from news.weights import apply_weighted_scores
 from store import (
-    article_exists,
     create_event,
+    find_article_event_id,
     find_candidate_events,
+    find_unenriched_events,
     get_event_articles,
     insert_article,
+    touch_event_seen,
     update_event,
 )
 from util.cycle_log import CycleLog
@@ -32,7 +34,7 @@ from util.time import utcnow
 logger = logging.getLogger(__name__)
 
 EVENT_MATCH_THRESHOLD = 0.4
-MAX_ENRICHMENTS_PER_CYCLE = 100
+MAX_ENRICHMENTS_PER_CYCLE = 200
 
 ENRICH_SYSTEM_PROMPT = """\
 You are a financial market analyst. Given multiple signals about the same market event,
@@ -125,6 +127,45 @@ def _signal_tickers(signal: Signal, watchlist: list[str]) -> list[str]:
     hints = list(signal.tickers_hint)
     extracted = extract_tickers(f"{signal.title} {signal.snippet}", known=watchlist)
     return list(dict.fromkeys(hints + extracted))
+
+
+def _should_ingest_signal(signal: Signal, watchlist: list[str]) -> bool:
+    """Drop noisy low-signal sources that lack watchlist ticker relevance."""
+    watchset = {s.upper() for s in watchlist}
+    tickers = _signal_tickers(signal, watchlist)
+
+    if signal.source.startswith("polymarket"):
+        if not tickers or not any(t in watchset for t in tickers):
+            return False
+
+    if signal.source.startswith("sec_edgar"):
+        if not tickers or not any(t in watchset for t in tickers):
+            return False
+        if any(t.endswith("W") for t in tickers):
+            return False
+
+    return True
+
+
+def _enrichment_priority(event_signals: list[Signal], watchlist: list[str]) -> float:
+    watchset = {s.upper() for s in watchlist}
+    tickers = set()
+    for sig in event_signals:
+        tickers.update(_signal_tickers(sig, watchlist))
+    watchlist_hit = bool(tickers & watchset)
+    max_weight = max((s.weight for s in event_signals), default=0.5)
+    low_source = any(
+        s.source.startswith(("polymarket", "reddit", "google_trends", "stocktwits"))
+        for s in event_signals
+    )
+    score = max_weight * 10.0
+    if watchlist_hit:
+        score += 100.0
+    if any(s.weight >= 0.9 for s in event_signals):
+        score += 25.0
+    if low_source:
+        score -= 30.0
+    return score
 
 
 def _log_event_enrichment(
@@ -221,8 +262,18 @@ async def process_signals(
     enrichment_logged = False
 
     for signal in signals:
+        if not _should_ingest_signal(signal, watchlist):
+            stats["skipped"] += 1
+            continue
+
         h = url_hash(signal.url)
-        if article_exists(db_path, h):
+        existing_event_id = find_article_event_id(db_path, h)
+        if existing_event_id is not None:
+            touch_event_seen(
+                db_path,
+                existing_event_id,
+                seen_at=signal.published_at or utcnow(),
+            )
             stats["skipped"] += 1
             continue
 
@@ -272,7 +323,12 @@ async def process_signals(
         events_to_enrich[event_id] = raw_for_event
 
     enriched_count = 0
-    for event_id, event_signals in events_to_enrich.items():
+    enrich_queue = sorted(
+        events_to_enrich.items(),
+        key=lambda item: _enrichment_priority(item[1], watchlist),
+        reverse=True,
+    )
+    for event_id, event_signals in enrich_queue:
         if enriched_count >= MAX_ENRICHMENTS_PER_CYCLE:
             if not enrichment_logged:
                 log.line(
@@ -281,6 +337,63 @@ async def process_signals(
                 )
                 enrichment_logged = True
             break
+        enriched, parsed_ok = await _enrich_event(llm, event_signals)
+        importance, confidence = apply_weighted_scores(
+            event_signals,
+            importance=enriched.importance,
+            confidence=enriched.confidence,
+        )
+        _log_event_enrichment(
+            log,
+            event_id,
+            event_signals,
+            enriched,
+            parsed_ok=parsed_ok,
+            importance=importance,
+            confidence=confidence,
+        )
+        last_seen = max(
+            (s.published_at or utcnow() for s in event_signals),
+            default=utcnow(),
+        )
+        update_event(
+            db_path,
+            event_id,
+            summary=enriched.summary,
+            event_type=enriched.event_type,
+            sentiment=enriched.sentiment,
+            importance=importance,
+            confidence=confidence,
+            tickers=enriched.tickers,
+            companies=enriched.companies,
+            article_count=len(event_signals),
+            last_seen_at=last_seen,
+        )
+        stats["updated_events"] += 1
+        enriched_count += 1
+
+    # Backfill stub events that already have articles but missed enrichment.
+    backfill_ids = [
+        eid for eid in find_unenriched_events(db_path, limit=50)
+        if eid not in events_to_enrich
+    ]
+    for event_id in backfill_ids:
+        if enriched_count >= MAX_ENRICHMENTS_PER_CYCLE:
+            break
+        stored = get_event_articles(db_path, event_id)
+        if not stored:
+            continue
+        event_signals = [
+            Signal(
+                url=a.url,
+                title=a.title,
+                source=a.source,
+                published_at=a.published_at,
+                snippet=a.snippet,
+                weight=a.weight,
+            )
+            for a in stored
+        ]
         enriched, parsed_ok = await _enrich_event(llm, event_signals)
         importance, confidence = apply_weighted_scores(
             event_signals,
