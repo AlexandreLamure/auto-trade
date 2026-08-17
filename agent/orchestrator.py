@@ -214,11 +214,18 @@ def _validate_settings(settings: Settings) -> None:
 
     if not key or key.startswith("your_"):
         errors.append("ALPACA_API_KEY is not set (still has placeholder value).")
-    elif not key.startswith("PK"):
+    elif settings.alpaca_paper_trade and not key.startswith("PK"):
         errors.append(
             f"ALPACA_API_KEY does not start with 'PK' (got '{key[:4]}...'). "
             "Paper trading keys start with PK. "
             "Get yours at https://app.alpaca.markets/paper/dashboard/overview"
+        )
+    elif not settings.alpaca_paper_trade and not key.startswith("AK"):
+        errors.append(
+            f"ALPACA_API_KEY does not start with 'AK' (got '{key[:4]}...'). "
+            "Live trading keys start with AK. "
+            "Set ALPACA_PAPER_TRADE=true to use paper keys (PK…), or use live keys from "
+            "https://app.alpaca.markets/live/dashboard/overview"
         )
 
     if not secret or secret.startswith("your_"):

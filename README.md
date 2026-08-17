@@ -53,7 +53,7 @@ from the event store — no live news fetching during deliberation.
 | Alpaca paper account | [app.alpaca.markets](https://app.alpaca.markets/paper/dashboard/overview) |
 | News API keys (optional) | RSS runs without keys; add API keys for broader coverage |
 
-Paper API keys must start with `PK`. The trading agent validates this at startup.
+Paper API keys must start with `PK`; live keys start with `AK`. The trading agent validates the prefix against `ALPACA_PAPER_TRADE` at startup.
 
 ---
 
@@ -180,7 +180,7 @@ auto-trade/
 
 | Variable | Default | Description |
 |---|---|---|
-| `ALPACA_API_KEY` | – | Alpaca paper API key (must start with `PK`) |
+| `ALPACA_API_KEY` | – | Alpaca API key (`PK…` for paper, `AK…` for live) |
 | `ALPACA_SECRET_KEY` | – | Alpaca secret key |
 | `ALPACA_PAPER_TRADE` | `true` | Use paper trading endpoint |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
