@@ -6,7 +6,6 @@ import json
 import logging
 from dataclasses import dataclass
 
-from agent.llm_client import OllamaClient
 from config.settings import Settings
 from news.models import Signal
 from news.sources.base import (
@@ -15,9 +14,9 @@ from news.sources.base import (
     title_similarity,
     url_hash,
 )
-from agent.workflow import truncate_text
 from news.weights import apply_weighted_scores
 from store import (
+    StoredArticle,
     create_event,
     find_article_event_id,
     find_candidate_events,
@@ -29,6 +28,8 @@ from store import (
 )
 from util.cycle_log import CycleLog
 from util.json_parse import extract_json_block
+from util.llm_client import OllamaClient
+from util.text import truncate_text
 from util.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,63 @@ async def _enrich_event(
     )
 
 
+def _signals_from_articles(articles: list[StoredArticle]) -> list[Signal]:
+    return [
+        Signal(
+            url=a.url,
+            title=a.title,
+            source=a.source,
+            published_at=a.published_at,
+            snippet=a.snippet,
+            weight=a.weight,
+        )
+        for a in articles
+    ]
+
+
+async def _persist_enrichment(
+    llm: OllamaClient,
+    db_path: str,
+    event_id: str,
+    event_signals: list[Signal],
+    log: CycleLog,
+    stats: dict[str, int],
+) -> None:
+    enriched, parsed_ok = await _enrich_event(llm, event_signals)
+    importance, confidence = apply_weighted_scores(
+        event_signals,
+        importance=enriched.importance,
+        confidence=enriched.confidence,
+    )
+    _log_event_enrichment(
+        log,
+        event_id,
+        event_signals,
+        enriched,
+        parsed_ok=parsed_ok,
+        importance=importance,
+        confidence=confidence,
+    )
+    last_seen = max(
+        (s.published_at or utcnow() for s in event_signals),
+        default=utcnow(),
+    )
+    update_event(
+        db_path,
+        event_id,
+        summary=enriched.summary,
+        event_type=enriched.event_type,
+        sentiment=enriched.sentiment,
+        importance=importance,
+        confidence=confidence,
+        tickers=enriched.tickers,
+        companies=enriched.companies,
+        article_count=len(event_signals),
+        last_seen_at=last_seen,
+    )
+    stats["updated_events"] += 1
+
+
 async def process_signals(
     settings: Settings,
     signals: list[Signal],
@@ -309,18 +367,7 @@ async def process_signals(
         )
 
         stored = get_event_articles(db_path, event_id)
-        raw_for_event = [
-            Signal(
-                url=a.url,
-                title=a.title,
-                source=a.source,
-                published_at=a.published_at,
-                snippet=a.snippet,
-                weight=a.weight,
-            )
-            for a in stored
-        ]
-        events_to_enrich[event_id] = raw_for_event
+        events_to_enrich[event_id] = _signals_from_articles(stored)
 
     enriched_count = 0
     enrich_queue = sorted(
@@ -337,39 +384,7 @@ async def process_signals(
                 )
                 enrichment_logged = True
             break
-        enriched, parsed_ok = await _enrich_event(llm, event_signals)
-        importance, confidence = apply_weighted_scores(
-            event_signals,
-            importance=enriched.importance,
-            confidence=enriched.confidence,
-        )
-        _log_event_enrichment(
-            log,
-            event_id,
-            event_signals,
-            enriched,
-            parsed_ok=parsed_ok,
-            importance=importance,
-            confidence=confidence,
-        )
-        last_seen = max(
-            (s.published_at or utcnow() for s in event_signals),
-            default=utcnow(),
-        )
-        update_event(
-            db_path,
-            event_id,
-            summary=enriched.summary,
-            event_type=enriched.event_type,
-            sentiment=enriched.sentiment,
-            importance=importance,
-            confidence=confidence,
-            tickers=enriched.tickers,
-            companies=enriched.companies,
-            article_count=len(event_signals),
-            last_seen_at=last_seen,
-        )
-        stats["updated_events"] += 1
+        await _persist_enrichment(llm, db_path, event_id, event_signals, log, stats)
         enriched_count += 1
 
     # Backfill stub events that already have articles but missed enrichment.
@@ -383,50 +398,9 @@ async def process_signals(
         stored = get_event_articles(db_path, event_id)
         if not stored:
             continue
-        event_signals = [
-            Signal(
-                url=a.url,
-                title=a.title,
-                source=a.source,
-                published_at=a.published_at,
-                snippet=a.snippet,
-                weight=a.weight,
-            )
-            for a in stored
-        ]
-        enriched, parsed_ok = await _enrich_event(llm, event_signals)
-        importance, confidence = apply_weighted_scores(
-            event_signals,
-            importance=enriched.importance,
-            confidence=enriched.confidence,
+        await _persist_enrichment(
+            llm, db_path, event_id, _signals_from_articles(stored), log, stats
         )
-        _log_event_enrichment(
-            log,
-            event_id,
-            event_signals,
-            enriched,
-            parsed_ok=parsed_ok,
-            importance=importance,
-            confidence=confidence,
-        )
-        last_seen = max(
-            (s.published_at or utcnow() for s in event_signals),
-            default=utcnow(),
-        )
-        update_event(
-            db_path,
-            event_id,
-            summary=enriched.summary,
-            event_type=enriched.event_type,
-            sentiment=enriched.sentiment,
-            importance=importance,
-            confidence=confidence,
-            tickers=enriched.tickers,
-            companies=enriched.companies,
-            article_count=len(event_signals),
-            last_seen_at=last_seen,
-        )
-        stats["updated_events"] += 1
         enriched_count += 1
 
     return stats

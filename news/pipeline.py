@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from agent.llm_client import OllamaClient
+from util.llm_client import OllamaClient
 from config.settings import Settings
 from news.analyzer import process_signals
 from news.collector import collect_signals

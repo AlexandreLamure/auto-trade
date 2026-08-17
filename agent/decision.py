@@ -19,13 +19,8 @@ logger = logging.getLogger(__name__)
 
 _PARSE_FAILURE_REASON = "Could not parse a valid decision from LLM output."
 
-_THINK_TAG = "think"
 _THINK_PATTERNS = (
     re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE),
-    re.compile(
-        rf"<{_THINK_TAG}>.*?</{_THINK_TAG}>",
-        re.DOTALL | re.IGNORECASE,
-    ),
     re.compile(r"<thinking>.*?</thinking>", re.DOTALL | re.IGNORECASE),
 )
 
@@ -87,14 +82,6 @@ def order_to_dict(order: TradeOrder) -> dict[str, Any]:
     }
 
 
-def portfolio_to_dict(decision: PortfolioDecision) -> dict[str, Any]:
-    return {
-        "consensus_summary": decision.consensus_summary,
-        "dissent": decision.dissent,
-        "orders": [order_to_dict(o) for o in decision.orders],
-    }
-
-
 def proposal_to_dict(proposal: PersonaProposal) -> dict[str, Any]:
     return {
         "persona": proposal.persona,
@@ -103,16 +90,6 @@ def proposal_to_dict(proposal: PersonaProposal) -> dict[str, Any]:
         "key_points": proposal.key_points,
         "commentary": proposal.commentary,
         "orders": [order_to_dict(o) for o in proposal.orders],
-    }
-
-
-def build_portfolio_snapshot(brief: Any) -> dict[str, Any]:
-    return {
-        "equity": brief.portfolio_equity,
-        "cash": brief.cash_available,
-        "month_pnl_pct": brief.month_pnl_pct,
-        "held_symbols": brief.held_symbols,
-        "candidate_symbols": brief.candidate_symbols,
     }
 
 

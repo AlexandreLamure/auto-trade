@@ -16,14 +16,15 @@ from datetime import datetime, timezone
 
 from config.settings import Settings
 from servers.manager import MCPManager
-from agent.llm_client import OllamaClient
 from agent.decision import PortfolioDecision, TradeOrder
-from agent.workflow import format_mcp_summary, is_market_open, truncate_text
+from agent.workflow import format_mcp_summary, is_market_open
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import build_validation_context, validate_orders
 from store import MarketEvent
 from util.cycle_log import CycleLog, get_trading_log
+from util.llm_client import OllamaClient
+from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class AgentOrchestrator:
                 if not market_open:
                     log.line(f"SKIP – {clock_detail}")
                     return
-                await self._run_committee_cycle(manager, cycle_id, log)
+                await self._run_committee_cycle(manager, log)
 
         except Exception as exc:  # noqa: BLE001
             logger.error("Cycle failed: %s", exc, exc_info=True)
@@ -63,7 +64,7 @@ class AgentOrchestrator:
             log.line(f"Duration: {elapsed:.0f}s")
 
     async def _run_committee_cycle(
-        self, manager: MCPManager, cycle_id: str, log: CycleLog
+        self, manager: MCPManager, log: CycleLog
     ) -> None:
         brief = await run_deep_research(manager, self._settings)
         _log_portfolio(brief, log)
@@ -71,11 +72,10 @@ class AgentOrchestrator:
         _log_market_events(brief, self._settings, log)
 
         log.section("Deliberation")
-        portfolio_decision, _transcript = await run_committee(
+        portfolio_decision = await run_committee(
             self._llm,
             brief,
             self._settings,
-            cycle_id=cycle_id,
             cycle_log=log,
         )
         _log_decision(portfolio_decision, log)
@@ -146,11 +146,11 @@ def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:
     )
     held_detail = []
     positions_raw = brief.raw_sections.get("positions", "")
-    from agent.workflow import parse_mcp_json, unwrap_alpaca_payload, _iter_positions
+    from servers.portfolio import iter_positions, parse_mcp_json, unwrap_alpaca_payload
 
     raw = parse_mcp_json(positions_raw)
     payload = unwrap_alpaca_payload(raw) if raw is not None else None
-    positions = _iter_positions(payload)
+    positions = iter_positions(payload)
     if positions:
         held_detail = [f"{s} {qty:g}" for s, qty in positions]
         log.line(f"Holdings: {', '.join(held_detail)}")

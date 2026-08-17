@@ -1,9 +1,8 @@
+import json
 from functools import cached_property
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from news.weights import parse_source_weights
 
 _SOURCE_WEIGHTS_DEFAULT = (
     '{"sec_edgar":1.0,"company_ir":1.0,"rss":0.9,"api":0.8,'
@@ -98,7 +97,25 @@ class Settings(BaseSettings):
 
     @cached_property
     def source_weights_map(self) -> dict[str, float]:
-        return parse_source_weights(self.source_weights)
+        return _parse_source_weights(self.source_weights)
+
+
+def _parse_source_weights(raw: str) -> dict[str, float]:
+    if not raw or not raw.strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, float] = {}
+    for key, value in data.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 settings = Settings()

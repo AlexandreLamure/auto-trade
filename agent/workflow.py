@@ -2,85 +2,23 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, TYPE_CHECKING
+
+from servers.portfolio import (
+    extract_mover_symbols,
+    iter_positions,
+    merge_symbol_universe,
+    parse_float_field,
+    parse_mcp_json,
+    unwrap_alpaca_payload,
+)
+from util.text import truncate_text
 
 if TYPE_CHECKING:
     from servers.manager import MCPManager
 
 logger = logging.getLogger(__name__)
-
-
-def truncate_text(text: str, limit: int = 3000) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n… [truncated]"
-
-
-def parse_mcp_json(text: str) -> Any:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
-
-
-def unwrap_alpaca_payload(raw: Any) -> Any:
-    """Unwrap Alpaca MCP responses: {\"_alpaca_mcp_security\": ..., \"data\": ...}."""
-    if not isinstance(raw, dict):
-        return raw
-    if "data" in raw:
-        return raw["data"]
-    return raw
-
-
-def parse_float_field(value: Any, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def extract_mover_symbols(movers_result: str, n: int = 3) -> list[str]:
-    """Return up to *n* ticker symbols from a get_market_movers tool result."""
-    raw = parse_mcp_json(movers_result)
-    if raw is None:
-        return []
-
-    payload = unwrap_alpaca_payload(raw)
-    if not isinstance(payload, dict):
-        return []
-    gainers = payload.get("gainers") or []
-    if not isinstance(gainers, list):
-        return []
-
-    ranked: list[tuple[float, str]] = []
-    for item in gainers:
-        if not isinstance(item, dict):
-            continue
-        symbol = str(item.get("symbol", "")).upper().strip()
-        if not symbol:
-            continue
-        price = float(item.get("price") or 0)
-        pct = abs(float(item.get("percent_change") or 0))
-        penalty = 0.0
-        if symbol.endswith("W"):
-            penalty += 1000.0
-        if price < 1.0:
-            penalty += 500.0
-        ranked.append((penalty - pct, symbol))
-
-    ranked.sort(key=lambda pair: pair[0])
-    symbols: list[str] = []
-    seen: set[str] = set()
-    for _, symbol in ranked:
-        if symbol in seen:
-            continue
-        seen.add(symbol)
-        symbols.append(symbol)
-        if len(symbols) >= n:
-            break
-    return symbols
 
 
 def parse_market_clock(result_text: str) -> tuple[bool | None, str]:
@@ -125,26 +63,6 @@ async def is_market_open(manager: MCPManager) -> tuple[bool, str]:
     return True, detail
 
 
-async def call_mcp_tool(
-    manager: MCPManager,
-    name: str,
-    arguments: dict[str, Any] | None = None,
-    tool_call_log: list[dict[str, Any]] | None = None,
-) -> str:
-    """Execute one MCP tool and optionally append to *tool_call_log*."""
-    args = arguments or {}
-    try:
-        result = await manager.call_tool(name, args)
-        result_text = manager.result_to_text(result)
-    except Exception as exc:  # noqa: BLE001
-        result_text = f"ERROR executing tool '{name}': {exc}"
-        logger.warning(result_text)
-
-    if tool_call_log is not None:
-        tool_call_log.append({"name": name, "args": args, "result": result_text})
-    return result_text
-
-
 def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str:
     """One-line human-readable summary of an MCP tool call."""
     if result_text.startswith("ERROR"):
@@ -159,7 +77,7 @@ def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str
         return f"get_account(cash=${cash:,.2f}, equity=${equity:,.2f})"
 
     if name == "get_all_positions":
-        positions = _iter_positions(payload)
+        positions = iter_positions(payload)
         if not positions:
             return "get_positions(0 positions)"
         detail = ", ".join(f"{symbol} {qty:g}" for symbol, qty in positions)
@@ -192,58 +110,6 @@ def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str
     return f"{label} → {truncate_text(result_text, 150)}"
 
 
-def _iter_positions(payload: Any) -> list[tuple[str, float]]:
-    """Return (symbol, quantity) pairs from an Alpaca positions payload."""
-    if isinstance(payload, list):
-        positions = payload
-    elif isinstance(payload, dict):
-        positions = payload.get("result") or payload.get("positions") or []
-    else:
-        return []
-    if not isinstance(positions, list):
-        return []
-
-    held: list[tuple[str, float]] = []
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        symbol = str(pos.get("symbol", "")).upper().strip()
-        if not symbol:
-            continue
-        qty = parse_float_field(pos.get("qty") or pos.get("quantity"))
-        held.append((symbol, qty))
-    return held
-
-
-def extract_position_symbols(positions_result: str) -> list[str]:
-    """Return held ticker symbols from get_all_positions JSON."""
-    raw = parse_mcp_json(positions_result)
-    if raw is None:
-        return []
-    return [symbol for symbol, _ in _iter_positions(unwrap_alpaca_payload(raw))]
-
-
-def merge_symbol_universe(
-    held: list[str],
-    movers: list[str],
-    *,
-    max_candidates: int,
-) -> tuple[list[str], list[str]]:
-    """Return (held_symbols, candidate_symbols) deduplicated."""
-    held_unique = list(dict.fromkeys(s.upper() for s in held))
-    candidates: list[str] = []
-    seen = set(held_unique)
-    for symbol in movers:
-        sym = symbol.upper()
-        if sym in seen:
-            continue
-        seen.add(sym)
-        candidates.append(sym)
-        if len(candidates) >= max_candidates:
-            break
-    return held_unique, candidates
-
-
 def parse_latest_prices(bars_json: str) -> dict[str, float]:
     """Extract the latest daily close price per symbol from get_stock_bars JSON."""
     raw = parse_mcp_json(bars_json)
@@ -271,7 +137,7 @@ def parse_latest_prices(bars_json: str) -> dict[str, float]:
     return prices
 
 
-def parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
+def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     """Return OHLCV bar lists keyed by symbol from get_stock_bars JSON."""
     raw = parse_mcp_json(bars_json)
     if raw is None:
@@ -289,17 +155,16 @@ def parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
-def compute_price_analytics(bars_json: str) -> tuple[str, dict[str, dict[str, float]]]:
-    """Build a compact markdown table and per-symbol metrics from bar data."""
-    bars_by_symbol = parse_bars_by_symbol(bars_json)
+def compute_price_analytics(bars_json: str) -> str:
+    """Build a compact markdown table from bar data."""
+    bars_by_symbol = _parse_bars_by_symbol(bars_json)
     if not bars_by_symbol:
-        return "_No price analytics available._", {}
+        return "_No price analytics available._"
 
     lines = [
         "| Symbol | Price | 1d% | 5d% | 20d% | vs 30d High | Vol×Avg |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    metrics: dict[str, dict[str, float]] = {}
 
     for symbol in sorted(bars_by_symbol):
         bars = bars_by_symbol[symbol]
@@ -321,22 +186,14 @@ def compute_price_analytics(bars_json: str) -> tuple[str, dict[str, dict[str, fl
         vol_avg = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
         vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1.0
 
-        metrics[symbol] = {
-            "price": price,
-            "ret_1d": ret_1d,
-            "ret_5d": ret_5d,
-            "ret_20d": ret_20d,
-            "dist_high": dist_high,
-            "vol_ratio": vol_ratio,
-        }
         lines.append(
             f"| {symbol} | ${price:.2f} | {ret_1d:+.1f}% | {ret_5d:+.1f}% | "
             f"{ret_20d:+.1f}% | {dist_high:+.1f}% | {vol_ratio:.1f}x |"
         )
 
     if len(lines) <= 2:
-        return "_No price analytics available._", {}
-    return "\n".join(lines), metrics
+        return "_No price analytics available._"
+    return "\n".join(lines)
 
 
 def expand_symbol_universe(

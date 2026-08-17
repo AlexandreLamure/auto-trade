@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from news.weights import UNKNOWN_SOURCE_WEIGHT
 from store.db import connect, get_connection
 from util.time import parse_iso, to_iso, utcnow
+
+_DEFAULT_WEIGHT = 0.5
 
 
 def _loads_json_list(value: str | None) -> list[str]:
@@ -24,6 +24,18 @@ def _loads_json_list(value: str | None) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(item) for item in data if item]
+
+
+def _normalize_tickers(tickers: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for ticker in tickers or []:
+        sym = str(ticker).upper().strip()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
 
 
 @dataclass
@@ -51,7 +63,7 @@ class MarketEvent:
             sentiment=row["sentiment"],
             importance=int(row["importance"]),
             confidence=float(row["confidence"]),
-            tickers=_loads_json_list(row["tickers"]),
+            tickers=_normalize_tickers(_loads_json_list(row["tickers"])),
             companies=_loads_json_list(row["companies"]),
             article_count=int(row["article_count"]),
             first_seen_at=parse_iso(row["first_seen_at"]) or utcnow(),
@@ -72,12 +84,12 @@ class StoredArticle:
     snippet: str
     event_id: str
     fetched_at: datetime
-    weight: float = UNKNOWN_SOURCE_WEIGHT
+    weight: float = _DEFAULT_WEIGHT
 
     @classmethod
     def from_row(cls, row: Any) -> StoredArticle:
         keys = row.keys()
-        weight = float(row["weight"]) if "weight" in keys else UNKNOWN_SOURCE_WEIGHT
+        weight = float(row["weight"]) if "weight" in keys else _DEFAULT_WEIGHT
         return cls(
             id=row["id"],
             url=row["url"],
@@ -95,15 +107,6 @@ class StoredArticle:
 def init_db(path: str) -> None:
     conn = connect(path)
     conn.close()
-
-
-def article_exists(db_path: str, url_hash: str) -> bool:
-    with get_connection(db_path) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM articles WHERE url_hash = ? LIMIT 1",
-            (url_hash,),
-        ).fetchone()
-        return row is not None
 
 
 def find_article_event_id(db_path: str, url_hash: str) -> str | None:
@@ -136,17 +139,6 @@ def touch_event_seen(
         conn.commit()
 
 
-def _sync_event_tickers(conn: sqlite3.Connection, event_id: str, tickers: list[str]) -> None:
-    conn.execute("DELETE FROM event_tickers WHERE event_id = ?", (event_id,))
-    for ticker in tickers:
-        sym = str(ticker).upper().strip()
-        if sym:
-            conn.execute(
-                "INSERT OR IGNORE INTO event_tickers (event_id, ticker) VALUES (?, ?)",
-                (event_id, sym),
-            )
-
-
 def create_event(
     db_path: str,
     *,
@@ -165,7 +157,7 @@ def create_event(
     now = utcnow()
     first_seen = first_seen_at or now
     last_seen = last_seen_at or now
-    tickers = tickers or []
+    tickers = _normalize_tickers(tickers)
     companies = companies or []
 
     with get_connection(db_path) as conn:
@@ -193,7 +185,6 @@ def create_event(
                 to_iso(now),
             ),
         )
-        _sync_event_tickers(conn, event_id, tickers)
         conn.commit()
     return event_id
 
@@ -232,7 +223,7 @@ def update_event(
         values.append(confidence)
     if tickers is not None:
         fields.append("tickers = ?")
-        values.append(json.dumps(tickers))
+        values.append(json.dumps(_normalize_tickers(tickers)))
     if companies is not None:
         fields.append("companies = ?")
         values.append(json.dumps(companies))
@@ -255,8 +246,6 @@ def update_event(
             f"UPDATE events SET {', '.join(fields)} WHERE id = ?",
             values,
         )
-        if tickers is not None:
-            _sync_event_tickers(conn, event_id, tickers)
         conn.commit()
 
 
@@ -270,7 +259,7 @@ def insert_article(
     snippet: str,
     event_id: str,
     published_at: datetime | None = None,
-    weight: float = UNKNOWN_SOURCE_WEIGHT,
+    weight: float = _DEFAULT_WEIGHT,
 ) -> str:
     article_id = uuid.uuid4().hex
     now = utcnow()
@@ -330,11 +319,10 @@ def _query_events(
         params: list[Any] = [cutoff, min_importance, *sorted(tickers), limit]
         sql = f"""
             SELECT DISTINCT e.*
-            FROM events e
-            INNER JOIN event_tickers et ON et.event_id = e.id
+            FROM events e, json_each(e.tickers) je
             WHERE e.last_seen_at >= ?
               AND e.importance >= ?
-              AND et.ticker IN ({placeholders})
+              AND UPPER(TRIM(je.value)) IN ({placeholders})
               {stub_filter}
             ORDER BY e.importance DESC, e.last_seen_at DESC
             LIMIT ?
@@ -343,7 +331,6 @@ def _query_events(
             rows = conn.execute(sql, params).fetchall()
         return [MarketEvent.from_row(row) for row in rows]
 
-    fetch_limit = limit
     with get_connection(db_path) as conn:
         rows = conn.execute(
             f"""
@@ -354,7 +341,7 @@ def _query_events(
             ORDER BY {order_clause}
             LIMIT ?
             """,
-            (cutoff, min_importance, fetch_limit),
+            (cutoff, min_importance, limit),
         ).fetchall()
 
     return [MarketEvent.from_row(row) for row in rows]
@@ -417,13 +404,15 @@ def discover_event_tickers(
     with get_connection(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT et.ticker, MAX(e.importance) AS imp, MAX(e.last_seen_at) AS seen
-            FROM event_tickers et
-            INNER JOIN events e ON e.id = et.event_id
+            SELECT UPPER(TRIM(je.value)) AS ticker,
+                   MAX(e.importance) AS imp,
+                   MAX(e.last_seen_at) AS seen
+            FROM events e, json_each(e.tickers) je
             WHERE e.last_seen_at >= ?
               AND e.importance >= ?
               AND NOT (e.event_type = 'unknown' AND e.article_count = 0)
-            GROUP BY et.ticker
+              AND TRIM(je.value) != ''
+            GROUP BY ticker
             ORDER BY imp DESC, seen DESC
             LIMIT ?
             """,
@@ -476,10 +465,6 @@ def prune_old_events(db_path: str, *, ttl_days: int = 30) -> int:
         placeholders = ",".join("?" for _ in event_ids)
         conn.execute(
             f"DELETE FROM articles WHERE event_id IN ({placeholders})",
-            event_ids,
-        )
-        conn.execute(
-            f"DELETE FROM event_tickers WHERE event_id IN ({placeholders})",
             event_ids,
         )
         conn.execute(

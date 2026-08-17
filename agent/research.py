@@ -18,19 +18,18 @@ from typing import Any
 
 from config.settings import Settings
 from servers.manager import MCPManager
+from servers.portfolio import (
+    call_mcp_tool,
+    load_positions_and_movers,
+    parse_float_field,
+    parse_mcp_json,
+    unwrap_alpaca_payload,
+)
 from agent.personas import HORIZON_DAYS
 from agent.workflow import (
-    call_mcp_tool,
     compute_price_analytics,
     expand_symbol_universe,
-    extract_mover_symbols,
-    extract_position_symbols,
-    merge_symbol_universe,
-    parse_float_field,
     parse_latest_prices,
-    parse_mcp_json,
-    truncate_text,
-    unwrap_alpaca_payload,
 )
 from store import (
     MarketEvent,
@@ -40,6 +39,7 @@ from store import (
     init_db,
     query_events,
 )
+from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -276,9 +276,13 @@ async def run_deep_research(
     sections["account"] = account
     cash, equity = _parse_account_cash(account)
 
-    positions = await call_mcp_tool(manager, "get_all_positions", tool_call_log=log)
-    sections["positions"] = positions
-    held = extract_position_symbols(positions)
+    snapshot = await load_positions_and_movers(
+        manager,
+        n_movers=settings.research_symbol_count,
+        tool_call_log=log,
+    )
+    sections["positions"] = snapshot.positions_json
+    held = snapshot.held
 
     history = await call_mcp_tool(
         manager,
@@ -297,14 +301,8 @@ async def run_deep_research(
     )
     sections["orders"] = orders
 
-    movers = await call_mcp_tool(
-        manager,
-        "get_market_movers",
-        {"market_type": "stocks"},
-        tool_call_log=log,
-    )
-    sections["movers"] = movers
-    mover_symbols = extract_mover_symbols(movers, n=settings.research_symbol_count)
+    sections["movers"] = snapshot.movers_json
+    mover_symbols = snapshot.mover_symbols
 
     event_tickers = _discover_symbols_from_events(settings, held)
     held, candidates = expand_symbol_universe(
@@ -328,7 +326,7 @@ async def run_deep_research(
             tool_call_log=log,
         )
         latest_prices = parse_latest_prices(bars)
-        price_analytics_markdown, _metrics = compute_price_analytics(bars)
+        price_analytics_markdown = compute_price_analytics(bars)
         sections["price_analytics"] = price_analytics_markdown
 
     events_text, market_events = load_market_events(all_symbols, settings)
@@ -386,7 +384,7 @@ async def enrich_brief_prices(
         tool_call_log=brief.tool_call_log,
     )
     new_prices = parse_latest_prices(bars)
-    extra_analytics, _ = compute_price_analytics(bars)
+    extra_analytics = compute_price_analytics(bars)
 
     updated_prices = {**brief.latest_prices, **new_prices}
     combined_analytics = brief.price_analytics_markdown

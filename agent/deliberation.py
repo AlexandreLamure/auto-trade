@@ -11,21 +11,16 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from dataclasses import dataclass
 
 from config.settings import Settings
 from agent.decision import (
     PersonaProposal,
     PortfolioDecision,
-    build_portfolio_snapshot,
     parse_persona_proposal,
     parse_portfolio_decision,
-    portfolio_to_dict,
     proposal_to_dict,
 )
-from agent.llm_client import OllamaClient
 from agent.personas import (
     CHAIR_JSON_SCHEMA,
     DEBATE_JSON_SCHEMA,
@@ -36,8 +31,9 @@ from agent.personas import (
     build_trader_personas,
 )
 from agent.research import ResearchBrief
-from agent.workflow import truncate_text
 from util.cycle_log import CycleLog
+from util.llm_client import OllamaClient
+from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,55 +45,7 @@ class DeliberationTurn:
     round: int
     content: str
     thinking: str | None = None
-    parsed_proposal: dict[str, Any] | None = None
-
-
-@dataclass
-class DeliberationTranscript:
-    cycle_id: str
-    started_at: str
-    duration_seconds: float
-    research_summary: str
-    portfolio_snapshot: dict[str, Any]
-    rounds: list[DeliberationTurn] = field(default_factory=list)
-    consensus: dict[str, Any] | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "cycle_id": self.cycle_id,
-            "started_at": self.started_at,
-            "duration_seconds": self.duration_seconds,
-            "research_summary": self.research_summary,
-            "portfolio_snapshot": self.portfolio_snapshot,
-            "rounds": [
-                {
-                    "persona": t.persona,
-                    "persona_name": t.persona_name,
-                    "round": t.round,
-                    "content": t.content,
-                    "thinking": t.thinking,
-                    "parsed_proposal": t.parsed_proposal,
-                }
-                for t in self.rounds
-            ],
-            "consensus": self.consensus,
-        }
-
-
-def _proposal_from_turn(turn: DeliberationTurn) -> PersonaProposal:
-    if turn.parsed_proposal:
-        data = turn.parsed_proposal
-        from agent.decision import _parse_order_list
-
-        return PersonaProposal(
-            persona=data.get("persona", turn.persona),
-            stance=str(data.get("stance", "HOLD")).upper(),
-            orders=_parse_order_list(data.get("orders") or []),
-            confidence=float(data.get("confidence", 0)),
-            key_points=list(data.get("key_points") or []),
-            commentary=str(data.get("commentary", "") or ""),
-        )
-    return parse_persona_proposal(turn.content, persona=turn.persona, extra_text=turn.thinking)
+    proposal: PersonaProposal | None = None
 
 
 def _sizing_hint(brief: ResearchBrief, max_position_pct: float) -> str:
@@ -202,12 +150,11 @@ async def _call_persona(
         cycle_log.line(truncate_text(content, 4000))
         cycle_log.line("")
 
-    if persona.id == "chair":
-        parsed = parse_portfolio_decision(content, extra_text=response.thinking)
-        parsed_dict = portfolio_to_dict(parsed)
-    else:
-        proposal = parse_persona_proposal(content, persona=persona.id, extra_text=response.thinking)
-        parsed_dict = proposal_to_dict(proposal)
+    proposal = None
+    if persona.id != "chair":
+        proposal = parse_persona_proposal(
+            content, persona=persona.id, extra_text=response.thinking
+        )
 
     return DeliberationTurn(
         persona=persona.id,
@@ -215,7 +162,7 @@ async def _call_persona(
         round=round_num,
         content=content,
         thinking=response.thinking,
-        parsed_proposal=parsed_dict,
+        proposal=proposal,
     )
 
 
@@ -224,12 +171,10 @@ async def run_committee(
     brief: ResearchBrief,
     settings: Settings,
     *,
-    cycle_id: str,
     cycle_log: CycleLog | None = None,
-) -> tuple[PortfolioDecision, DeliberationTranscript]:
-    """Run multi-round deliberation and return consensus + transcript."""
+) -> PortfolioDecision:
+    """Run multi-round deliberation and return consensus."""
     started = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
     deadline = started + settings.max_cycle_seconds
 
     traders = build_trader_personas(
@@ -243,13 +188,7 @@ async def run_committee(
         settings.max_orders_per_cycle,
     )
 
-    transcript = DeliberationTranscript(
-        cycle_id=cycle_id,
-        started_at=started_at,
-        duration_seconds=0.0,
-        research_summary=truncate_text(brief.summary_markdown, 4000),
-        portfolio_snapshot=build_portfolio_snapshot(brief),
-    )
+    rounds: list[DeliberationTurn] = []
 
     round1_prompt = _build_round1_user_prompt(
         brief, max_position_pct=settings.max_position_pct
@@ -261,9 +200,13 @@ async def run_committee(
         for persona in traders
     ]
     round1_turns = await asyncio.gather(*round1_tasks)
-    transcript.rounds.extend(round1_turns)
+    rounds.extend(round1_turns)
 
-    round1_proposals = [_proposal_from_turn(t) for t in round1_turns]
+    round1_proposals = [
+        t.proposal
+        or parse_persona_proposal(t.content, persona=t.persona, extra_text=t.thinking)
+        for t in round1_turns
+    ]
 
     if settings.enable_debate_round and time.monotonic() < deadline:
         debate_prompt = _build_debate_user_prompt(
@@ -280,18 +223,17 @@ async def run_committee(
                 round_num=2,
                 cycle_log=cycle_log,
             )
-            transcript.rounds.append(turn)
+            rounds.append(turn)
 
     chair_prompt = _build_chair_user_prompt(
         brief,
-        transcript.rounds,
+        rounds,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
     )
     chair_turn = await _call_persona(
         llm, chair, chair_prompt, round_num=3, cycle_log=cycle_log
     )
-    transcript.rounds.append(chair_turn)
 
     decision = parse_portfolio_decision(chair_turn.content, extra_text=chair_turn.thinking)
     if not decision.parsed_ok:
@@ -303,11 +245,8 @@ async def run_committee(
             round_num=3,
             cycle_log=cycle_log,
         )
-        transcript.rounds.append(chair_turn_retry)
         decision = parse_portfolio_decision(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    transcript.consensus = portfolio_to_dict(decision)
-    transcript.duration_seconds = time.monotonic() - started
-    return decision, transcript
+    return decision

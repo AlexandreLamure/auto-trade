@@ -3,7 +3,6 @@
 from store.events import (
     MarketEvent,
     StoredArticle,
-    article_exists,
     count_events,
     create_event,
     discover_event_tickers,
@@ -22,7 +21,6 @@ from store.events import (
 __all__ = [
     "MarketEvent",
     "StoredArticle",
-    "article_exists",
     "count_events",
     "create_event",
     "discover_event_tickers",

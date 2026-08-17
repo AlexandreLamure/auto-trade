@@ -23,10 +23,6 @@ from util.cycle_log import init_trading_log
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
 
-async def _run_once(orchestrator: AgentOrchestrator) -> None:
-    await orchestrator.run_cycle()
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Autonomous Trading Agent")
     parser.add_argument(
@@ -49,7 +45,7 @@ def main() -> None:
     orchestrator = AgentOrchestrator(settings)
 
     if args.once:
-        asyncio.run(_run_once(orchestrator))
+        asyncio.run(orchestrator.run_cycle())
     else:
         asyncio.run(
             run_scheduled_service(

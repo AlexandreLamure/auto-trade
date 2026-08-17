@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,24 +19,6 @@ _SOURCE_PREFIX_MAP: dict[str, str] = {
     "stocktwits": "stocktwits",
     "google_trends": "google_trends",
 }
-
-
-def parse_source_weights(raw: str) -> dict[str, float]:
-    if not raw or not raw.strip():
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    result: dict[str, float] = {}
-    for key, value in data.items():
-        try:
-            result[str(key)] = float(value)
-        except (TypeError, ValueError):
-            continue
-    return result
 
 
 def resolve_weight(source: str, weights: dict[str, float]) -> float:

@@ -7,7 +7,6 @@ and order execution.  News is handled by the separate news analysis service.
 Usage (async context manager):
 
     async with MCPManager(settings) as manager:
-        tools = manager.tools          # list[mcp.types.Tool]
         result = await manager.call_tool("get_account_info", {})
 """
 
@@ -32,7 +31,6 @@ class MCPManager:
         self._settings = settings
         self._exit_stack = AsyncExitStack()
         self._tool_sessions: dict[str, ClientSession] = {}
-        self.tools: list[mcp_types.Tool] = []
 
     async def __aenter__(self) -> "MCPManager":
         await self._exit_stack.__aenter__()
@@ -73,7 +71,6 @@ class MCPManager:
                     label,
                 )
             self._tool_sessions[tool.name] = session
-            self.tools.append(tool)
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any] | None = None
