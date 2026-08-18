@@ -281,10 +281,6 @@ async def _persist_enrichment(
         importance=importance,
         confidence=confidence,
     )
-    last_seen = max(
-        (s.published_at or utcnow() for s in event_signals),
-        default=utcnow(),
-    )
     update_event(
         db_path,
         event_id,
@@ -296,7 +292,7 @@ async def _persist_enrichment(
         tickers=enriched.tickers,
         companies=enriched.companies,
         article_count=len(event_signals),
-        last_seen_at=last_seen,
+        last_seen_at=utcnow(),
     )
     stats["updated_events"] += 1
 
@@ -327,11 +323,7 @@ async def process_signals(
         h = url_hash(signal.url)
         existing_event_id = find_article_event_id(db_path, h)
         if existing_event_id is not None:
-            touch_event_seen(
-                db_path,
-                existing_event_id,
-                seen_at=signal.published_at or utcnow(),
-            )
+            touch_event_seen(db_path, existing_event_id, seen_at=utcnow())
             stats["skipped"] += 1
             continue
 
@@ -346,7 +338,7 @@ async def process_signals(
                 summary=signal.title,
                 tickers=tickers,
                 first_seen_at=signal.published_at or utcnow(),
-                last_seen_at=signal.published_at or utcnow(),
+                last_seen_at=utcnow(),
             )
 
         insert_article(

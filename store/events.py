@@ -125,16 +125,25 @@ def touch_event_seen(
     *,
     seen_at: datetime | None = None,
 ) -> None:
-    """Bump last_seen_at when a duplicate article URL is re-ingested."""
-    when = seen_at or utcnow()
+    """Bump last_seen_at forward when a duplicate article URL is re-ingested.
+
+    last_seen_at is ingest time, never article published_at. Older timestamps
+    must not rewind a live event out of the trader's lookback window.
+    """
+    when_iso = to_iso(seen_at or utcnow())
+    now_iso = to_iso(utcnow())
     with get_connection(db_path) as conn:
         conn.execute(
             """
             UPDATE events
-            SET last_seen_at = ?, updated_at = ?
+            SET last_seen_at = CASE
+                    WHEN last_seen_at < ? THEN ?
+                    ELSE last_seen_at
+                END,
+                updated_at = ?
             WHERE id = ?
             """,
-            (to_iso(when), to_iso(utcnow()), event_id),
+            (when_iso, when_iso, now_iso, event_id),
         )
         conn.commit()
 
@@ -284,6 +293,15 @@ def insert_article(
                 weight,
             ),
         )
+        conn.execute(
+            """
+            UPDATE events
+            SET article_count = article_count + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (to_iso(now), event_id),
+        )
         conn.commit()
     return article_id
 
@@ -308,11 +326,11 @@ def _query_events(
 ) -> list[MarketEvent]:
     cutoff = to_iso(utcnow() - timedelta(hours=since_hours))
     order_clause = (
-        "importance DESC, last_seen_at DESC"
+        "e.importance DESC, e.last_seen_at DESC"
         if order_by_importance
-        else "last_seen_at DESC"
+        else "e.last_seen_at DESC"
     )
-    stub_filter = "AND NOT (event_type = 'unknown' AND article_count = 0)"
+    has_articles = "AND EXISTS (SELECT 1 FROM articles a WHERE a.event_id = e.id)"
 
     if tickers:
         placeholders = ",".join("?" for _ in tickers)
@@ -323,7 +341,7 @@ def _query_events(
             WHERE e.last_seen_at >= ?
               AND e.importance >= ?
               AND UPPER(TRIM(je.value)) IN ({placeholders})
-              {stub_filter}
+              {has_articles}
             ORDER BY e.importance DESC, e.last_seen_at DESC
             LIMIT ?
         """
@@ -334,10 +352,10 @@ def _query_events(
     with get_connection(db_path) as conn:
         rows = conn.execute(
             f"""
-            SELECT * FROM events
-            WHERE last_seen_at >= ?
-              AND importance >= ?
-              {stub_filter}
+            SELECT e.* FROM events e
+            WHERE e.last_seen_at >= ?
+              AND e.importance >= ?
+              {has_articles}
             ORDER BY {order_clause}
             LIMIT ?
             """,
@@ -410,7 +428,7 @@ def discover_event_tickers(
             FROM events e, json_each(e.tickers) je
             WHERE e.last_seen_at >= ?
               AND e.importance >= ?
-              AND NOT (e.event_type = 'unknown' AND e.article_count = 0)
+              AND EXISTS (SELECT 1 FROM articles a WHERE a.event_id = e.id)
               AND TRIM(je.value) != ''
             GROUP BY ticker
             ORDER BY imp DESC, seen DESC
@@ -433,14 +451,16 @@ def discover_event_tickers(
 
 
 def find_unenriched_events(db_path: str, *, limit: int = 50) -> list[str]:
-    """Return event ids with articles but stub metadata."""
+    """Return event ids that have article rows but still stub metadata."""
     with get_connection(db_path) as conn:
         rows = conn.execute(
             """
             SELECT e.id
             FROM events e
             WHERE e.event_type = 'unknown'
-              AND e.article_count > 0
+              AND EXISTS (
+                  SELECT 1 FROM articles a WHERE a.event_id = e.id
+              )
             ORDER BY e.last_seen_at DESC
             LIMIT ?
             """,
