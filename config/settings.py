@@ -37,11 +37,6 @@ class Settings(BaseSettings):
     alpha_vantage_api_key: str = Field("", description="Alpha Vantage API key")
     marketaux_api_key: str = Field("", description="Marketaux API key")
 
-    # News service
-    news_loop_interval_hours: int = Field(
-        6, description="How often the news service runs (hours)"
-    )
-
     # Signal source weights (JSON map of source type to weight)
     source_weights: str = Field(
         _SOURCE_WEIGHTS_DEFAULT,
@@ -64,26 +59,6 @@ class Settings(BaseSettings):
     enable_google_trends: bool = Field(True, description="Fetch Google Trends spikes")
     enable_sec_edgar: bool = Field(True, description="Fetch SEC EDGAR filings")
     enable_stocktwits: bool = Field(False, description="Fetch Stocktwits (often rate-limited)")
-
-    # Trading scheduler
-    loop_interval_hours: int = Field(6, description="Fallback interval when session schedule is off")
-    session_schedule: bool = Field(
-        True, description="Run on US cash-session cron times instead of a raw interval"
-    )
-    market_timezone: str = Field(
-        "America/New_York", description="Timezone for session cron schedules"
-    )
-    news_session_times: str = Field(
-        "09:20,12:50",
-        description="Weekday ET times to run the news service (HH:MM,HH:MM)",
-    )
-    trade_session_times: str = Field(
-        "09:40,13:00",
-        description="Weekday ET times to run the trading agent (HH:MM,HH:MM)",
-    )
-    news_stale_minutes: int = Field(
-        90, description="Refresh news before a trade cycle if the store is older than this"
-    )
 
     # Committee
     research_symbol_count: int = Field(

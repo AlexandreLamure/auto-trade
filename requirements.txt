@@ -11,9 +11,6 @@ alpaca-mcp-server>=2.1
 pydantic-settings>=2.0
 python-dotenv>=1.0
 
-# ── Scheduler ─────────────────────────────────────────────────────────────────
-apscheduler>=3.10
-
 # ── News service dependencies ─────────────────────────────────────────────────
 httpx>=0.27
 feedparser>=6.0

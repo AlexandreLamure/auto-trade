@@ -402,15 +402,6 @@ def query_events(
     )
 
 
-def latest_event_activity(db_path: str) -> datetime | None:
-    """Return the newest events.updated_at, or None if the store is empty."""
-    with get_connection(db_path) as conn:
-        row = conn.execute("SELECT MAX(updated_at) AS ts FROM events").fetchone()
-    if not row or not row["ts"]:
-        return None
-    return parse_iso(str(row["ts"]))
-
-
 def count_events(db_path: str) -> int:
     with get_connection(db_path) as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()

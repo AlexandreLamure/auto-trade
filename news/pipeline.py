@@ -12,6 +12,7 @@ from news.collector import collect_signals
 from news.watchlist import resolve_watchlist
 from store import count_events, init_db, prune_old_events
 from util.cycle_log import get_news_log
+from util.session import is_market_open, market_closed_message
 
 
 async def run_cycle(settings: Settings) -> dict[str, int]:
@@ -20,6 +21,10 @@ async def run_cycle(settings: Settings) -> dict[str, int]:
     started = time.monotonic()
     started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     log.start_cycle(f"NEWS CYCLE {started_at}")
+
+    if not is_market_open():
+        log.line(market_closed_message())
+        return {}
 
     init_db(settings.event_store_path)
     pruned = prune_old_events(settings.event_store_path, ttl_days=settings.event_ttl_days)

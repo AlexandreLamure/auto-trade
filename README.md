@@ -3,46 +3,45 @@
 A fully local autonomous stock trading agent that uses a local LLM (via Ollama),
 Alpaca paper trading, and MCP tool servers. A multi-agent investment committee
 performs deep research, debates the best move, and rebalances the paper portfolio
-toward 30-day PnL — up to 10 minutes per cycle, on the US cash session by default
-(news before the open, trade at/after the open, optional afternoon review).
+toward 30-day PnL — up to 10 minutes per cycle.
 
-Market intelligence is provided by a **separate news analysis service** that
-continuously fetches news, groups articles into market events, and stores
-structured summaries in a shared SQLite event store.
+Market intelligence is provided by a news analysis pipeline that fetches news,
+groups articles into market events, and stores structured summaries in a shared
+SQLite event store. One process runs news and/or trading: a single shot, or a
+daily loop at 12:00 America/New_York. Cycles skip immediately when the US cash
+session is closed (weekdays 09:30–16:00 ET).
 
 ---
 
 ## Architecture
 
 ```
-news_main.py  (session cron: 09:20 and 12:50 ET, weekdays)
-  └── news/pipeline.py
-       ├── news/collector.py       (APIs + RSS feeds)
-       ├── news/analyzer.py        (dedupe, group, LLM enrich)
-       └── store/events.py         → data/events.db
-
-trade_main.py  (session cron: 09:40 and 13:00 ET, weekdays)
+main.py  (--news-once | --trade-once | --once | --loop)
+  ├── news/pipeline.py
+  │    ├── news/collector.py       (APIs + RSS feeds)
+  │    ├── news/analyzer.py        (dedupe, group, LLM enrich)
+  │    └── store/events.py         → data/events.db
   └── agent/orchestrator.py
        ├── agent/research.py        (Phase 1: Alpaca data + event store query)
        ├── agent/deliberation.py    (Phase 2: 4 traders + chair debate)
        ├── agent/personas.py        (trader personalities)
        ├── agent/risk.py            (pre-trade validation)
        ├── agent/decision.py        (PortfolioDecision parser)
-       ├── agent/llm_client.py      (Ollama via OpenAI SDK)
+       ├── util/llm_client.py       (Ollama via OpenAI SDK)
        └── servers/manager.py       (Alpaca MCP only)
             └── servers/alpaca.py   → alpaca-mcp-server (stdio)
 ```
 
-**News service** (09:20 and 12:50 ET weekdays): resolves a dynamic watchlist from Alpaca (held
-positions + gainers/losers + event tickers, same as the trading agent); fetches from RSS
+**News cycle**: resolves a dynamic watchlist from Alpaca (held positions +
+gainers/losers + event tickers, same as the trading agent); fetches from RSS
 (first-class), NewsAPI, Finnhub, Alpha Vantage, and Marketaux; deduplicates
 articles; groups into market events; LLM-enriches each event with summary,
-sentiment, importance, and tickers.
+sentiment, importance, and tickers. Skips immediately if the US cash session
+is closed.
 
-**Trading agent** (09:40 and 13:00 ET weekdays): refreshes news if the event store is stale,
-then reads portfolio data from Alpaca and market events from the store. Cycles still
-run if the cash session opens within 20 minutes so the open is not skipped. Each cycle
-writes a decision journal (proposals, fills, later 1d/5d/30d marks) into the event store.
+**Trading cycle**: reads portfolio data from Alpaca and market events from the
+store. Each cycle writes a decision journal (proposals, fills, later 1d/5d/30d
+marks) into the event store. Skips immediately if the US cash session is closed.
 
 ---
 
@@ -99,29 +98,18 @@ ollama serve
 
 ## Running
 
-### Two-process model (recommended)
-
-Run both services in separate terminals:
+With no flags, `python main.py` prints help and exits. Pick one mode:
 
 ```bash
-# Terminal 1 — news intelligence (populates event store)
-python news_main.py
-
-# Terminal 2 — trading agent (reads event store)
-python trade_main.py
+python main.py --news-once     # one news cycle, then exit
+python main.py --trade-once    # one trade cycle, then exit
+python main.py --once          # news, then trade, then exit
+python main.py --loop          # news then trade every day at 12:00 America/New_York
 ```
 
-### News service only (populate event store)
-
-```bash
-python news_main.py --once
-```
-
-### Trading agent — single cycle (testing)
-
-```bash
-python trade_main.py --once
-```
+`--once` and `--loop` always run news then trading sequentially (the next step
+starts when the previous one finishes). If the US cash session is closed when a
+cycle starts, that cycle logs `SKIP – market closed` and returns immediately.
 
 ---
 
@@ -145,7 +133,6 @@ auto-trade/
 ├── agent/
 │   ├── decision.py         # PortfolioDecision + persona parsers
 │   ├── deliberation.py     # Multi-round committee loop
-│   ├── llm_client.py       # Ollama / OpenAI-compatible LLM client
 │   ├── orchestrator.py     # Cycle coordinator, execution, logging
 │   ├── personas.py         # Trader + chair prompts
 │   ├── research.py         # Alpaca research + event store query
@@ -170,8 +157,7 @@ auto-trade/
 ├── logs/
 │   ├── news.log            # News cycle log (human-readable)
 │   └── trading.log         # Trading cycle log (human-readable)
-├── news_main.py            # News service entry point
-├── trade_main.py           # Trading agent entry point
+├── main.py                 # Single entry point
 ├── .env.example
 ├── requirements.txt
 └── README.md
@@ -189,13 +175,6 @@ auto-trade/
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model name |
 | `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
-| `NEWS_LOOP_INTERVAL_HOURS` | `6` | Fallback news interval if `SESSION_SCHEDULE=false` |
-| `LOOP_INTERVAL_HOURS` | `6` | Fallback trading interval if `SESSION_SCHEDULE=false` |
-| `SESSION_SCHEDULE` | `true` | Use US cash-session cron times instead of a raw interval |
-| `MARKET_TIMEZONE` | `America/New_York` | Timezone for session cron |
-| `NEWS_SESSION_TIMES` | `09:20,12:50` | Weekday ET news runs |
-| `TRADE_SESSION_TIMES` | `09:40,13:00` | Weekday ET trading runs |
-| `NEWS_STALE_MINUTES` | `90` | Refresh news before a trade if the store is older |
 | `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
 | `FINNHUB_API_KEY` | – | Finnhub key (optional) |
 | `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
@@ -232,8 +211,8 @@ The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `age
 ## Notes and limitations
 
 - **Paper trading only by default.** Set `ALPACA_PAPER_TRADE=false` and use live keys to trade with real money — do so at your own risk.
-- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names. Orders placed outside market hours queue until the next session open.
-- Run `python news_main.py --once` before the first trading cycle to populate the event store.
+- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names.
+- Run `python main.py --news-once` (while the cash session is open) to populate the event store before the first `--trade-once`.
 - RSS feeds run without API keys; optional API keys extend coverage.
 - Model quality matters for JSON-only persona output. `qwen2.5:7b` is the documented minimum; larger models (e.g. Qwen3) work better with `ENABLE_THINKING=true`.
 - Buy orders are capped by `max_position_pct` using latest bar close prices from research.

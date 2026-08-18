@@ -168,11 +168,11 @@ def load_market_events(
 
     if not path.exists():
         logger.warning(
-            "Event store not found at %s – run `python news_main.py --once` first",
+            "Event store not found at %s – run `python main.py --news-once` first",
             db_path,
         )
         return (
-            "_No market events available. Start the news service: `python news_main.py`_",
+            "_No market events available. Run `python main.py --news-once` first._",
             [],
         )
 
