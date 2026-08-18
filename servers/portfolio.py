@@ -74,35 +74,30 @@ def extract_position_symbols(positions_result: str) -> list[str]:
     return [symbol for symbol, _ in iter_positions(unwrap_alpaca_payload(raw))]
 
 
-def extract_mover_symbols(movers_result: str, n: int = 3) -> list[str]:
-    """Return up to *n* ticker symbols from a get_market_movers tool result."""
-    raw = parse_mcp_json(movers_result)
-    if raw is None:
+def _rank_mover_side(items: Any, *, min_price: float, limit: int) -> list[str]:
+    if not isinstance(items, list):
         return []
-
-    payload = unwrap_alpaca_payload(raw)
-    if not isinstance(payload, dict):
-        return []
-    gainers = payload.get("gainers") or []
-    if not isinstance(gainers, list):
-        return []
-
     ranked: list[tuple[float, str]] = []
-    for item in gainers:
+    for item in items:
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol", "")).upper().strip()
         if not symbol:
             continue
-        price = float(item.get("price") or 0)
-        pct = abs(float(item.get("percent_change") or 0))
+        price = parse_float_field(item.get("price") or item.get("p"))
+        pct = abs(
+            parse_float_field(
+                item.get("percent_change")
+                or item.get("change_percent")
+                or item.get("percent")
+            )
+        )
         penalty = 0.0
         if symbol.endswith("W"):
             penalty += 1000.0
-        if price < 1.0:
+        if 0 < price < min_price:
             penalty += 500.0
         ranked.append((penalty - pct, symbol))
-
     ranked.sort(key=lambda pair: pair[0])
     symbols: list[str] = []
     seen: set[str] = set()
@@ -111,9 +106,51 @@ def extract_mover_symbols(movers_result: str, n: int = 3) -> list[str]:
             continue
         seen.add(symbol)
         symbols.append(symbol)
-        if len(symbols) >= n:
+        if len(symbols) >= limit:
             break
     return symbols
+
+
+def extract_mover_symbols(
+    movers_result: str,
+    n: int = 3,
+    *,
+    n_gainers: int | None = None,
+    n_losers: int | None = None,
+    min_price: float = 5.0,
+) -> list[str]:
+    """Return gainer and loser tickers from get_market_movers JSON."""
+    raw = parse_mcp_json(movers_result)
+    if raw is None:
+        return []
+
+    payload = unwrap_alpaca_payload(raw)
+    if not isinstance(payload, dict):
+        return []
+
+    gainer_n = n_gainers if n_gainers is not None else max(1, (n + 1) // 2)
+    loser_n = n_losers if n_losers is not None else max(1, n // 2)
+    gainers = _rank_mover_side(
+        payload.get("gainers") or [], min_price=min_price, limit=gainer_n
+    )
+    losers = _rank_mover_side(
+        payload.get("losers") or [], min_price=min_price, limit=loser_n
+    )
+    merged: list[str] = []
+    seen: set[str] = set()
+    # Interleave so a gainer-heavy tape cannot crowd out oversold names.
+    for pair in zip(gainers, losers):
+        for symbol in pair:
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            merged.append(symbol)
+    for symbol in gainers[len(losers) :] + losers[len(gainers) :]:
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        merged.append(symbol)
+    return merged
 
 
 def merge_symbol_universe(
@@ -161,6 +198,7 @@ async def load_positions_and_movers(
     manager: MCPManager,
     *,
     n_movers: int,
+    min_price: float = 5.0,
     tool_call_log: list[dict[str, Any]] | None = None,
 ) -> PositionsAndMovers:
     """Fetch open positions and market movers in one place."""
@@ -177,5 +215,7 @@ async def load_positions_and_movers(
         positions_json=positions_json,
         movers_json=movers_json,
         held=extract_position_symbols(positions_json),
-        mover_symbols=extract_mover_symbols(movers_json, n=n_movers),
+        mover_symbols=extract_mover_symbols(
+            movers_json, n=n_movers, min_price=min_price
+        ),
     )

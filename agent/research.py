@@ -29,6 +29,7 @@ from agent.personas import HORIZON_DAYS
 from agent.workflow import (
     compute_price_analytics,
     expand_symbol_universe,
+    filter_liquid_candidates,
     parse_latest_prices,
 )
 from store import (
@@ -278,7 +279,8 @@ async def run_deep_research(
 
     snapshot = await load_positions_and_movers(
         manager,
-        n_movers=settings.research_symbol_count,
+        n_movers=settings.mover_candidate_slots,
+        min_price=settings.min_candidate_price,
         tool_call_log=log,
     )
     sections["positions"] = snapshot.positions_json
@@ -310,9 +312,12 @@ async def run_deep_research(
         mover_symbols,
         event_tickers,
         max_candidates=settings.research_symbol_count,
+        mover_slots=settings.mover_candidate_slots,
+        event_slots=settings.event_candidate_slots,
     )
     all_symbols = list(dict.fromkeys(held + candidates))
 
+    bars = ""
     if all_symbols:
         bars = await call_mcp_tool(
             manager,
@@ -326,7 +331,15 @@ async def run_deep_research(
             tool_call_log=log,
         )
         latest_prices = parse_latest_prices(bars)
-        price_analytics_markdown = compute_price_analytics(bars)
+        if bars:
+            candidates = filter_liquid_candidates(
+                candidates,
+                bars,
+                min_price=settings.min_candidate_price,
+                min_adv_shares=settings.min_adv_shares,
+            )
+            all_symbols = list(dict.fromkeys(held + candidates))
+        price_analytics_markdown = compute_price_analytics(bars, all_symbols)
         sections["price_analytics"] = price_analytics_markdown
 
     events_text, market_events = load_market_events(all_symbols, settings)

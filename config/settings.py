@@ -69,7 +69,21 @@ class Settings(BaseSettings):
     loop_interval_hours: int = Field(6, description="How often the agent runs (hours)")
 
     # Committee
-    research_symbol_count: int = Field(6, description="Max candidate symbols after dedup")
+    research_symbol_count: int = Field(
+        15, description="Max candidate symbols after dedup (excludes holdings)"
+    )
+    mover_candidate_slots: int = Field(
+        6, description="Candidate slots reserved for gainers and losers"
+    )
+    event_candidate_slots: int = Field(
+        6, description="Candidate slots reserved for event-discovered tickers"
+    )
+    min_candidate_price: float = Field(
+        5.0, description="Drop candidate names below this last price"
+    )
+    min_adv_shares: float = Field(
+        500_000, description="Drop candidate names with 20d avg volume below this"
+    )
     enable_debate_round: bool = Field(
         True, description="Run Round 2 trader debate before chair consensus"
     )
@@ -84,7 +98,7 @@ class Settings(BaseSettings):
     macro_events_limit: int = Field(10, description="Max macro events per cycle")
     event_ttl_days: int = Field(30, description="Delete events older than this many days")
     event_discovery_limit: int = Field(
-        6, description="Max symbols to add from high-importance events"
+        12, description="Max symbols to add from high-importance events"
     )
 
     # Risk guard

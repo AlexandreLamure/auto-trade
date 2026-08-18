@@ -8,7 +8,6 @@ from typing import Any, TYPE_CHECKING
 from servers.portfolio import (
     extract_mover_symbols,
     iter_positions,
-    merge_symbol_universe,
     parse_float_field,
     parse_mcp_json,
     unwrap_alpaca_payload,
@@ -155,9 +154,16 @@ def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
-def compute_price_analytics(bars_json: str) -> str:
+def compute_price_analytics(
+    bars_json: str, symbols: list[str] | None = None
+) -> str:
     """Build a compact markdown table from bar data."""
     bars_by_symbol = _parse_bars_by_symbol(bars_json)
+    if symbols is not None:
+        allow = {s.upper() for s in symbols}
+        bars_by_symbol = {
+            key: value for key, value in bars_by_symbol.items() if key in allow
+        }
     if not bars_by_symbol:
         return "_No price analytics available._"
 
@@ -202,18 +208,64 @@ def expand_symbol_universe(
     event_tickers: list[str],
     *,
     max_candidates: int,
+    mover_slots: int | None = None,
+    event_slots: int | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Merge held, movers, and event-discovered tickers into a research universe."""
-    held_unique, candidates = merge_symbol_universe(
-        held, movers, max_candidates=max_candidates
-    )
-    seen = set(held_unique) | set(candidates)
-    for symbol in event_tickers:
-        sym = symbol.upper()
-        if sym in seen:
-            continue
-        candidates.append(sym)
-        seen.add(sym)
-        if len(candidates) >= max_candidates:
-            break
+    """Merge held, movers, and event-discovered tickers into a research universe.
+
+    Event tickers get reserved slots so a full gainer list cannot crowd them out.
+    Remaining capacity is filled from leftover movers, then leftover events.
+    """
+    held_unique = list(dict.fromkeys(s.upper() for s in held if s))
+    mover_cap = mover_slots if mover_slots is not None else max_candidates
+    event_cap = event_slots if event_slots is not None else max_candidates
+    seen = set(held_unique)
+    candidates: list[str] = []
+
+    def _take(source: list[str], limit: int) -> None:
+        added = 0
+        for symbol in source:
+            if added >= limit or len(candidates) >= max_candidates:
+                return
+            sym = symbol.upper().strip()
+            if not sym or sym in seen or sym.endswith("W"):
+                continue
+            seen.add(sym)
+            candidates.append(sym)
+            added += 1
+
+    _take(movers, mover_cap)
+    _take(event_tickers, event_cap)
+    _take(movers, max_candidates)
+    _take(event_tickers, max_candidates)
     return held_unique, candidates
+
+
+def filter_liquid_candidates(
+    candidates: list[str],
+    bars_json: str,
+    *,
+    min_price: float,
+    min_adv_shares: float,
+) -> list[str]:
+    """Drop warrants, sub-min-price names, and thin volume from candidates."""
+    bars_by_symbol = _parse_bars_by_symbol(bars_json)
+    kept: list[str] = []
+    for symbol in candidates:
+        sym = symbol.upper()
+        if sym.endswith("W"):
+            continue
+        bars = bars_by_symbol.get(sym) or []
+        if not bars:
+            continue
+        closes = [parse_float_field(b.get("c") or b.get("close")) for b in bars]
+        volumes = [parse_float_field(b.get("v") or b.get("volume")) for b in bars]
+        price = closes[-1] if closes else 0.0
+        if price < min_price:
+            continue
+        recent = volumes[-20:] or volumes
+        adv = sum(recent) / len(recent) if recent else 0.0
+        if adv < min_adv_shares:
+            continue
+        kept.append(sym)
+    return kept

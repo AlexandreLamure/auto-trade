@@ -192,7 +192,11 @@ auto-trade/
 | `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
 | `MARKETAUX_API_KEY` | – | Marketaux key (optional) |
 | `LOOP_INTERVAL_HOURS` | `6` | Trading agent interval (hours) |
-| `RESEARCH_SYMBOL_COUNT` | `6` | Max candidate symbols after dedup |
+| `RESEARCH_SYMBOL_COUNT` | `15` | Max candidate symbols after dedup |
+| `MOVER_CANDIDATE_SLOTS` | `6` | Slots reserved for gainers and losers |
+| `EVENT_CANDIDATE_SLOTS` | `6` | Slots reserved for event-discovered tickers |
+| `MIN_CANDIDATE_PRICE` | `5.0` | Drop candidates below this last price |
+| `MIN_ADV_SHARES` | `500000` | Drop candidates below this 20-day avg volume |
 | `EVENTS_SINCE_HOURS` | `72` | How far back to query events |
 | `EVENTS_MIN_IMPORTANCE` | `2` | Min importance for symbol events |
 | `ENABLE_DEBATE_ROUND` | `true` | Run Round 2 trader debate before chair |
