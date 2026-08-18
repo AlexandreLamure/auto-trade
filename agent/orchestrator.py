@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from config.settings import Settings
 from servers.manager import MCPManager
 from agent.decision import PortfolioDecision, TradeOrder
-from agent.workflow import format_mcp_summary, should_run_trading_cycle
+from agent.workflow import format_mcp_summary, format_order_qty, parse_fractionable, parse_nbbo, should_run_trading_cycle
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import (
@@ -160,41 +160,78 @@ class AgentOrchestrator:
     ) -> None:
         for order in orders:
             try:
+                quote_text = ""
+                try:
+                    quote_result = await manager.call_tool(
+                        "get_stock_latest_quote", {"symbol": order.symbol}
+                    )
+                    quote_text = manager.result_to_text(quote_result)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Quote fetch failed for %s: %s", order.symbol, exc)
+                bid, ask = parse_nbbo(quote_text, order.symbol)
+                last = brief.latest_prices.get(order.symbol, 0.0)
+                if order.side == "buy":
+                    limit_px = ask if ask > 0 else last
+                else:
+                    limit_px = bid if bid > 0 else last
+                use_limit = limit_px > 0
+                if use_limit:
+                    limit_px = round(limit_px, 2)
+
+                fractionable = False
+                try:
+                    asset_result = await manager.call_tool(
+                        "get_asset", {"symbol": order.symbol}
+                    )
+                    fractionable = parse_fractionable(
+                        manager.result_to_text(asset_result)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Asset lookup failed for %s: %s", order.symbol, exc)
+
+                qty_str = format_order_qty(order.quantity, fractionable=fractionable)
                 payload: dict[str, str] = {
                     "symbol": order.symbol,
                     "side": order.side,
-                    "qty": str(int(order.quantity)),
-                    "type": "market",
+                    "qty": qty_str,
+                    "type": "limit" if use_limit else "market",
                     "time_in_force": "day",
                 }
+                if use_limit:
+                    payload["limit_price"] = str(limit_px)
                 if (
                     order.side == "buy"
                     and self._settings.enable_stops
                 ):
-                    price = brief.latest_prices.get(order.symbol, 0.0)
-                    if price > 0:
+                    ref = ask if ask > 0 else last
+                    if ref > 0:
                         dist = stop_distance(
-                            price,
+                            ref,
                             brief.price_stats.get(order.symbol),
                             stop_atr_multiple=self._settings.stop_atr_multiple,
                             stop_pct=self._settings.stop_pct,
                         )
-                        stop_px = round(price - dist, 2)
-                        if 0 < stop_px < price:
+                        stop_px = round(ref - dist, 2)
+                        if 0 < stop_px < ref:
                             payload["stop_loss_stop_price"] = str(stop_px)
                 result = await manager.call_tool("place_stock_order", payload)
                 result_text = manager.result_to_text(result)
                 failed = bool(result.isError) or result_text.startswith("ERROR")
                 summary = format_mcp_summary(
                     "place_stock_order",
-                    {"symbol": order.symbol, "side": order.side, "qty": int(order.quantity)},
+                    payload,
                     result_text,
                 )
                 status = "failed" if failed else "submitted"
                 log.line(
-                    f"{order.side.upper()} {order.symbol} x{order.quantity:.0f} → {status}"
+                    f"{order.side.upper()} {order.symbol} x{qty_str} → {status}"
                 )
                 log.line(f"  {summary}")
+                if use_limit and last > 0:
+                    slip = (limit_px / last - 1.0) * 100.0
+                    log.line(
+                        f"  Slippage vs last close: limit ${limit_px:.2f} vs ${last:.2f} ({slip:+.2f}%)"
+                    )
                 if failed:
                     logger.warning(
                         "Order not filled for %s %s: %s",
@@ -205,7 +242,7 @@ class AgentOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 logger.error("Trade execution failed for %s: %s", order.symbol, exc)
                 log.line(
-                    f"{order.side.upper()} {order.symbol} x{order.quantity:.0f} → error"
+                    f"{order.side.upper()} {order.symbol} x{order.quantity:g} → error"
                 )
 
 

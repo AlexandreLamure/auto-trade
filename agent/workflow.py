@@ -172,6 +172,52 @@ def parse_latest_prices(bars_json: str) -> dict[str, float]:
     return prices
 
 
+def parse_nbbo(quote_json: str, symbol: str) -> tuple[float, float]:
+    """Return (bid, ask) from get_stock_latest_quote JSON."""
+    if quote_json.startswith("ERROR"):
+        return 0.0, 0.0
+    raw = parse_mcp_json(quote_json)
+    if raw is None:
+        return 0.0, 0.0
+    payload = unwrap_alpaca_payload(raw)
+    quote: dict[str, Any] | None = None
+    if isinstance(payload, dict):
+        nested = payload.get("quote") or payload.get("quotes") or payload
+        if isinstance(nested, dict) and symbol.upper() in nested:
+            maybe = nested.get(symbol.upper())
+            quote = maybe if isinstance(maybe, dict) else None
+        elif isinstance(nested, dict):
+            quote = nested
+    if not isinstance(quote, dict):
+        return 0.0, 0.0
+    bid = parse_float_field(quote.get("bp") or quote.get("bid_price") or quote.get("bid"))
+    ask = parse_float_field(quote.get("ap") or quote.get("ask_price") or quote.get("ask"))
+    return bid, ask
+
+
+def parse_fractionable(asset_json: str) -> bool:
+    if asset_json.startswith("ERROR"):
+        return False
+    raw = parse_mcp_json(asset_json)
+    if raw is None:
+        return False
+    payload = unwrap_alpaca_payload(raw)
+    if not isinstance(payload, dict):
+        return False
+    flag = payload.get("fractionable")
+    if isinstance(flag, bool):
+        return flag
+    return str(flag).lower() in {"true", "1", "yes"}
+
+
+def format_order_qty(qty: float, *, fractionable: bool) -> str:
+    if not fractionable:
+        return str(max(1, int(qty)))
+    if abs(qty - round(qty)) < 1e-8:
+        return str(int(round(qty)))
+    return f"{qty:.6f}".rstrip("0").rstrip(".")
+
+
 def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     """Return OHLCV bar lists keyed by symbol from get_stock_bars JSON."""
     raw = parse_mcp_json(bars_json)

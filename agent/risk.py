@@ -196,9 +196,11 @@ def validate_orders(
             stop_pct=ctx.stop_pct,
         )
         risk_budget = equity * ctx.risk_per_name_pct if ctx.risk_per_name_pct > 0 else room
-        vol_shares = math.floor(risk_budget / stop_dist) if stop_dist > 0 else qty
-        max_shares = math.floor(room / price) if room > 0 else 0
-        max_affordable = math.floor(cash_remaining / price)
+        vol_shares = (
+            math.floor(risk_budget / stop_dist * 10000) / 10000 if stop_dist > 0 else qty
+        )
+        max_shares = math.floor(room / price * 10000) / 10000 if room > 0 else 0.0
+        max_affordable = math.floor(cash_remaining / price * 10000) / 10000
         capped = min(qty, max_shares, max_affordable, vol_shares)
         if capped < qty:
             rejections.append(
@@ -207,9 +209,9 @@ def validate_orders(
             )
         qty = capped
 
-        if qty < 1:
+        if qty <= 0:
             rejections.append(
-                f"BUY {order.symbol}: qty below 1 after equity/cash cap "
+                f"BUY {order.symbol}: qty below minimum after equity/cash cap "
                 f"(price=${price:.2f}, max ${max_name_notional:.2f} per name)"
             )
             continue

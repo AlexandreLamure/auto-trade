@@ -229,7 +229,7 @@ The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `age
 ## Notes and limitations
 
 - **Paper trading only by default.** Set `ALPACA_PAPER_TRADE=false` and use live keys to trade with real money — do so at your own risk.
-- The agent places **market orders** with `time_in_force=day`. Orders placed outside market hours queue until the next session open.
+- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names. Orders placed outside market hours queue until the next session open.
 - Run `python news_main.py --once` before the first trading cycle to populate the event store.
 - RSS feeds run without API keys; optional API keys extend coverage.
 - Model quality matters for JSON-only persona output. `qwen2.5:7b` is the documented minimum; larger models (e.g. Qwen3) work better with `ENABLE_THINKING=true`.
