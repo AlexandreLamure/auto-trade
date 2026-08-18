@@ -13,6 +13,20 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Position:
+    symbol: str
+    qty: float
+    avg_entry_price: float = 0.0
+    current_price: float = 0.0
+    market_value: float = 0.0
+    unrealized_pl: float = 0.0
+    unrealized_plpc: float = 0.0
+    cost_basis: float = 0.0
+    change_today: float = 0.0
+    days_held: int | None = None
+
+
+@dataclass
 class PositionsAndMovers:
     positions_json: str
     movers_json: str
@@ -43,8 +57,7 @@ def parse_float_field(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def iter_positions(payload: Any) -> list[tuple[str, float]]:
-    """Return (symbol, quantity) pairs from an Alpaca positions payload."""
+def _position_dicts(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         positions = payload
     elif isinstance(payload, dict):
@@ -53,11 +66,122 @@ def iter_positions(payload: Any) -> list[tuple[str, float]]:
         return []
     if not isinstance(positions, list):
         return []
+    return [pos for pos in positions if isinstance(pos, dict)]
 
-    held: list[tuple[str, float]] = []
-    for pos in positions:
-        if not isinstance(pos, dict):
+
+def parse_positions(positions_json: str) -> list[Position]:
+    """Parse Alpaca positions into structured holdings with P&L fields."""
+    raw = parse_mcp_json(positions_json)
+    if raw is None:
+        return []
+    result: list[Position] = []
+    for pos in _position_dicts(unwrap_alpaca_payload(raw)):
+        symbol = str(pos.get("symbol", "")).upper().strip()
+        if not symbol:
             continue
+        qty = parse_float_field(pos.get("qty") or pos.get("quantity"))
+        avg = parse_float_field(pos.get("avg_entry_price") or pos.get("avg_entry"))
+        price = parse_float_field(pos.get("current_price") or pos.get("asset_current_price"))
+        market_value = parse_float_field(pos.get("market_value"))
+        if market_value == 0.0 and price > 0 and qty:
+            market_value = price * qty
+        cost = parse_float_field(pos.get("cost_basis") or pos.get("cost"))
+        if cost == 0.0 and avg > 0 and qty:
+            cost = avg * abs(qty)
+        unrealized = parse_float_field(pos.get("unrealized_pl") or pos.get("unrealized_intraday_pl"))
+        plpc = parse_float_field(pos.get("unrealized_plpc"))
+        if plpc == 0.0 and cost:
+            plpc = unrealized / abs(cost)
+        result.append(
+            Position(
+                symbol=symbol,
+                qty=qty,
+                avg_entry_price=avg,
+                current_price=price,
+                market_value=market_value,
+                unrealized_pl=unrealized,
+                unrealized_plpc=plpc,
+                cost_basis=cost,
+                change_today=parse_float_field(
+                    pos.get("change_today") or pos.get("unrealized_intraday_pl")
+                ),
+            )
+        )
+    return result
+
+
+def estimate_days_held(orders_json: str) -> dict[str, int]:
+    """Approximate days held from the oldest filled buy in recent orders."""
+    from datetime import datetime, timezone
+
+    from util.time import parse_iso, utcnow
+
+    raw = parse_mcp_json(orders_json)
+    if raw is None:
+        return {}
+    payload = unwrap_alpaca_payload(raw)
+    orders = payload if isinstance(payload, list) else []
+    if isinstance(payload, dict):
+        orders = payload.get("orders") or payload.get("result") or []
+    if not isinstance(orders, list):
+        return {}
+
+    oldest: dict[str, datetime] = {}
+    now = utcnow()
+    for item in orders:
+        if not isinstance(item, dict):
+            continue
+        side = str(item.get("side", "")).lower()
+        status = str(item.get("status", "")).lower()
+        if side != "buy" or status not in ("filled", "partially_filled"):
+            continue
+        symbol = str(item.get("symbol", "")).upper().strip()
+        filled_at = parse_iso(
+            str(item.get("filled_at") or item.get("submitted_at") or "")
+        )
+        if not symbol or filled_at is None:
+            continue
+        if filled_at.tzinfo is None:
+            filled_at = filled_at.replace(tzinfo=timezone.utc)
+        previous = oldest.get(symbol)
+        if previous is None or filled_at < previous:
+            oldest[symbol] = filled_at
+
+    days: dict[str, int] = {}
+    for symbol, when in oldest.items():
+        days[symbol] = max(0, (now - when).days)
+    return days
+
+
+def format_holdings_table(
+    positions: list[Position], *, equity: float
+) -> str:
+    """Markdown table: qty, cost, last, unrealized, weight, days held."""
+    if not positions:
+        return "_No open positions._"
+    lines = [
+        "| Symbol | Qty | Avg cost | Last | Unrealized | Weight | Days held |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for pos in positions:
+        weight = (pos.market_value / equity * 100.0) if equity > 0 else 0.0
+        pl_pct = pos.unrealized_plpc * 100.0
+        # Alpaca sometimes already stores percent (e.g. 1.5 meaning 150%).
+        if abs(pos.unrealized_plpc) > 2:
+            pl_pct = pos.unrealized_plpc
+        days = "—" if pos.days_held is None else str(pos.days_held)
+        lines.append(
+            f"| {pos.symbol} | {pos.qty:g} | ${pos.avg_entry_price:.2f} | "
+            f"${pos.current_price:.2f} | {pl_pct:+.1f}% (${pos.unrealized_pl:,.0f}) | "
+            f"{weight:.1f}% | {days} |"
+        )
+    return "\n".join(lines)
+
+
+def iter_positions(payload: Any) -> list[tuple[str, float]]:
+    """Return (symbol, quantity) pairs from an Alpaca positions payload."""
+    held: list[tuple[str, float]] = []
+    for pos in _position_dicts(payload):
         symbol = str(pos.get("symbol", "")).upper().strip()
         if not symbol:
             continue

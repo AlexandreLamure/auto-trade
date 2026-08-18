@@ -178,15 +178,13 @@ def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:
         f"Equity ${brief.portfolio_equity:,.2f} | Cash ${brief.cash_available:,.2f} | "
         f"30d PnL {pnl}"
     )
-    held_detail = []
-    positions_raw = brief.raw_sections.get("positions", "")
-    from servers.portfolio import iter_positions, parse_mcp_json, unwrap_alpaca_payload
-
-    raw = parse_mcp_json(positions_raw)
-    payload = unwrap_alpaca_payload(raw) if raw is not None else None
-    positions = iter_positions(payload)
-    if positions:
-        held_detail = [f"{s} {qty:g}" for s, qty in positions]
+    if brief.holdings:
+        held_detail = [
+            f"{p.symbol} {p.qty:g} ({p.unrealized_plpc * 100:+.1f}%)"
+            if abs(p.unrealized_plpc) <= 2
+            else f"{p.symbol} {p.qty:g} ({p.unrealized_plpc:+.1f}%)"
+            for p in brief.holdings
+        ]
         log.line(f"Holdings: {', '.join(held_detail)}")
     else:
         log.line(

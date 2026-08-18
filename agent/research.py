@@ -19,10 +19,14 @@ from typing import Any
 from config.settings import Settings
 from servers.manager import MCPManager
 from servers.portfolio import (
+    Position,
     call_mcp_tool,
+    estimate_days_held,
+    format_holdings_table,
     load_positions_and_movers,
     parse_float_field,
     parse_mcp_json,
+    parse_positions,
     unwrap_alpaca_payload,
 )
 from agent.personas import HORIZON_DAYS
@@ -61,6 +65,8 @@ class ResearchBrief:
     raw_sections: dict[str, str] = field(default_factory=dict)
     tool_call_log: list[dict[str, Any]] = field(default_factory=list)
     market_events: list[MarketEvent] = field(default_factory=list)
+    holdings: list[Position] = field(default_factory=list)
+    holdings_markdown: str = ""
 
     def to_prompt_context(self) -> str:
         return self.summary_markdown
@@ -80,6 +86,8 @@ class ResearchBrief:
             f"- Candidates: {', '.join(self.candidate_symbols) or 'none'}",
             "",
         ]
+        if self.holdings_markdown.strip():
+            lines.extend(["## Holdings", "", self.holdings_markdown, ""])
         if self.price_analytics_markdown.strip():
             lines.extend(["## Price analytics", "", self.price_analytics_markdown, ""])
         if self.events_markdown.strip():
@@ -247,9 +255,9 @@ def _build_summary(
     ]
 
     section_titles = {
+        "holdings": "Holdings",
         "price_analytics": "Price analytics",
         "account": "Account",
-        "positions": "Open positions",
         "portfolio_history": f"Portfolio history ({HORIZON_DAYS}d)",
         "orders": "Recent orders",
         "movers": "Market movers",
@@ -298,10 +306,15 @@ async def run_deep_research(
     orders = await call_mcp_tool(
         manager,
         "get_orders",
-        {"status": "all", "limit": 20},
+        {"status": "all", "limit": 100},
         tool_call_log=log,
     )
     sections["orders"] = orders
+
+    holdings = parse_positions(snapshot.positions_json)
+    days_held = estimate_days_held(orders)
+    for pos in holdings:
+        pos.days_held = days_held.get(pos.symbol)
 
     sections["movers"] = snapshot.movers_json
     mover_symbols = snapshot.mover_symbols
@@ -342,6 +355,14 @@ async def run_deep_research(
         price_analytics_markdown = compute_price_analytics(bars, all_symbols)
         sections["price_analytics"] = price_analytics_markdown
 
+    for pos in holdings:
+        if pos.current_price <= 0:
+            pos.current_price = latest_prices.get(pos.symbol, 0.0)
+        if pos.market_value <= 0 and pos.current_price and pos.qty:
+            pos.market_value = pos.current_price * abs(pos.qty)
+    holdings_markdown = format_holdings_table(holdings, equity=equity)
+    sections["holdings"] = holdings_markdown
+
     events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
 
@@ -369,6 +390,8 @@ async def run_deep_research(
         raw_sections=sections,
         tool_call_log=log,
         market_events=market_events,
+        holdings=holdings,
+        holdings_markdown=holdings_markdown,
     )
 
 
