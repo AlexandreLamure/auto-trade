@@ -25,6 +25,7 @@ class ValidationContext:
     latest_prices: dict[str, float]
     max_position_pct: float
     max_orders: int
+    max_new_names: int
     price_stats: dict[str, PriceStats]
     earnings_flags: dict[str, str]
     risk_per_name_pct: float
@@ -44,6 +45,47 @@ def stop_distance(
     atr_stop = (stats.atr * stop_atr_multiple) if stats and stats.atr > 0 else 0.0
     pct_stop = price * stop_pct
     return max(atr_stop, pct_stop, price * 0.02)
+
+
+def inject_bearish_sells(
+    orders: list[TradeOrder],
+    holdings: list[Position],
+    events: list,
+    *,
+    min_importance: int,
+) -> list[TradeOrder]:
+    """Add sells for held names with high-importance bearish events."""
+    held_qty = {pos.symbol: pos.qty for pos in holdings}
+    already = {(o.symbol, o.side) for o in orders}
+    extra: list[TradeOrder] = []
+    seen: set[str] = set()
+    for event in events:
+        if (getattr(event, "sentiment", "") or "").lower() != "bearish":
+            continue
+        if getattr(event, "importance", 0) < min_importance:
+            continue
+        for ticker in getattr(event, "tickers", []) or []:
+            symbol = str(ticker).upper()
+            if symbol in seen or symbol not in held_qty:
+                continue
+            if (symbol, "sell") in already:
+                continue
+            seen.add(symbol)
+            extra.append(
+                TradeOrder(
+                    symbol=symbol,
+                    side="sell",
+                    quantity=held_qty[symbol],
+                    rationale="high-importance bearish event on a held name",
+                    confidence=0.8,
+                )
+            )
+    return extra + orders
+
+
+def _order_rank(order: TradeOrder, prices: dict[str, float]) -> float:
+    notional = order.quantity * (prices.get(order.symbol, 0.0) or 1.0)
+    return order.confidence * notional if order.confidence else notional
 
 
 def inject_time_stops(
@@ -86,11 +128,13 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
     """Net buy/sell on the same symbol into a single order per side."""
     nets: dict[tuple[str, str], float] = {}
     rationales: dict[tuple[str, str], str] = {}
+    confidences: dict[tuple[str, str], float] = {}
     for order in orders:
         key = (order.symbol, order.side)
         nets[key] = nets.get(key, 0.0) + order.quantity
         if order.rationale:
             rationales[key] = order.rationale
+        confidences[key] = max(confidences.get(key, 0.0), order.confidence)
     result: list[TradeOrder] = []
     for (symbol, side), qty in nets.items():
         if qty <= 0:
@@ -101,6 +145,7 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
                 side=side,  # type: ignore[arg-type]
                 quantity=qty,
                 rationale=rationales.get((symbol, side), ""),
+                confidence=confidences.get((symbol, side), 0.0),
             )
         )
     return result
@@ -119,6 +164,24 @@ def validate_orders(
     """Return (approved_orders, rejection_reasons). Sells run before buys."""
     rejections: list[str] = []
     netted = _sells_first(net_orders(orders))
+    sells = [o for o in netted if o.side == "sell"]
+    buys = [o for o in netted if o.side != "sell"]
+    buys.sort(key=lambda o: _order_rank(o, ctx.latest_prices), reverse=True)
+
+    held = set(ctx.held_quantities)
+    ranked: list[TradeOrder] = list(sells)
+    new_names = 0
+    for buy in buys:
+        is_new = buy.symbol not in held
+        if is_new and new_names >= ctx.max_new_names:
+            rejections.append(
+                f"BUY {buy.symbol}: skipped, max {ctx.max_new_names} new name(s) this cycle"
+            )
+            continue
+        ranked.append(buy)
+        if is_new:
+            new_names += 1
+    netted = ranked
 
     if len(netted) > ctx.max_orders:
         rejections.append(
@@ -262,6 +325,7 @@ def build_validation_context(
         latest_prices=prices,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
+        max_new_names=settings.max_new_names_per_cycle,
         price_stats=price_stats or {},
         earnings_flags=earnings_flags or {},
         risk_per_name_pct=settings.risk_per_name_pct,

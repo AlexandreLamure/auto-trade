@@ -148,6 +148,12 @@ class Settings(BaseSettings):
         30, description="Sell held losers at or past this many days (0 disables)"
     )
     enable_stops: bool = Field(True, description="Attach a stop after each buy fill")
+    bearish_min_importance: int = Field(
+        4, description="Bearish events at or above this importance block new buys / force held sells"
+    )
+    max_new_names_per_cycle: int = Field(
+        1, description="Max new (not already held) names to buy per cycle"
+    )
 
     # LLM thinking mode (Qwen3 etc.)
     enable_thinking: bool = Field(True, description="Enable LLM thinking/reasoning mode")

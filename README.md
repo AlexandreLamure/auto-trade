@@ -219,6 +219,8 @@ auto-trade/
 | `RISK_PER_NAME_PCT` | `0.005` | Equity fraction risked per name (vol-aware size) |
 | `TIME_STOP_DAYS` | `30` | Sell held losers at or past this many days |
 | `ENABLE_STOPS` | `true` | Attach a stop after each buy |
+| `BEARISH_MIN_IMPORTANCE` | `4` | Bearish events at this importance block new names / sell held |
+| `MAX_NEW_NAMES_PER_CYCLE` | `1` | Max new names to buy per cycle |
 | `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
 

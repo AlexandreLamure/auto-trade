@@ -31,6 +31,7 @@ class TradeOrder:
     side: Literal["buy", "sell"]
     quantity: float
     rationale: str
+    confidence: float = 0.0
 
 
 @dataclass

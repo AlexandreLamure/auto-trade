@@ -143,10 +143,22 @@ def apply_consensus_gate(
                 dropped.append(f"buy {symbol}: no matching catalyst")
                 continue
 
-        kept.append(order)
+        kept.append(
+            TradeOrder(
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                rationale=order.rationale,
+                confidence=conf,
+            )
+        )
 
     if not dropped:
-        return decision
+        return PortfolioDecision(
+            orders=kept,
+            consensus_summary=decision.consensus_summary,
+            dissent=decision.dissent,
+        )
 
     summary = decision.consensus_summary
     note = "Gate dropped: " + "; ".join(dropped)

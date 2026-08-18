@@ -250,6 +250,31 @@ def earnings_flags_from_events(
     return flags
 
 
+def drop_bearish_nonheld(
+    candidates: list[str],
+    held: list[str],
+    events: list[MarketEvent],
+    *,
+    min_importance: int,
+) -> tuple[list[str], list[str]]:
+    """Remove non-held names that have a high-importance bearish event."""
+    held_set = {s.upper() for s in held}
+    blocked: list[str] = []
+    blocked_set: set[str] = set()
+    for event in events:
+        if (event.sentiment or "").lower() != "bearish":
+            continue
+        if event.importance < min_importance:
+            continue
+        for ticker in event.tickers:
+            sym = ticker.upper()
+            if sym and sym not in held_set and sym not in blocked_set:
+                blocked_set.add(sym)
+                blocked.append(sym)
+    kept = [c for c in candidates if c.upper() not in blocked_set]
+    return kept, blocked
+
+
 def _discover_symbols_from_events(settings: Settings, held: list[str]) -> list[str]:
     path = Path(settings.event_store_path)
     if not path.exists():
@@ -389,6 +414,20 @@ async def run_deep_research(
 
     events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
+    candidates, blocked_bearish = drop_bearish_nonheld(
+        candidates,
+        held,
+        market_events,
+        min_importance=settings.bearish_min_importance,
+    )
+    if blocked_bearish:
+        sections["market_events"] = (
+            events_text
+            + "\n\n_Dropped non-held bearish names: "
+            + ", ".join(blocked_bearish)
+            + "_"
+        )
+    all_symbols = list(dict.fromkeys(held + candidates))
     earn_flags = earnings_flags_from_events(
         market_events,
         all_symbols,

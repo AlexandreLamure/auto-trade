@@ -22,6 +22,7 @@ from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import (
     build_validation_context,
+    inject_bearish_sells,
     inject_time_stops,
     stop_distance,
     validate_orders,
@@ -138,6 +139,12 @@ class AgentOrchestrator:
             portfolio_decision.orders,
             brief.holdings,
             time_stop_days=self._settings.time_stop_days,
+        )
+        gated_orders = inject_bearish_sells(
+            gated_orders,
+            brief.holdings,
+            brief.market_events,
+            min_importance=self._settings.bearish_min_importance,
         )
         approved, rejections = validate_orders(gated_orders, ctx)
         if rejections:
