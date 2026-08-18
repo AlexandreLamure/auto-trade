@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -20,6 +22,21 @@ if TYPE_CHECKING:
     from servers.manager import MCPManager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PriceStats:
+    symbol: str
+    price: float
+    ret_1d: float
+    ret_5d: float
+    ret_20d: float
+    dist_high: float
+    vol_ratio: float
+    atr: float
+    realized_vol: float
+    adv_shares: float
+    dollar_adv: float
 
 
 def parse_market_clock(
@@ -173,51 +190,96 @@ def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
-def compute_price_analytics(
+def compute_price_stats(
     bars_json: str, symbols: list[str] | None = None
-) -> str:
-    """Build a compact markdown table from bar data."""
+) -> dict[str, PriceStats]:
+    """Per-symbol returns, ATR, realized vol, and average volume from daily bars."""
     bars_by_symbol = _parse_bars_by_symbol(bars_json)
     if symbols is not None:
         allow = {s.upper() for s in symbols}
         bars_by_symbol = {
             key: value for key, value in bars_by_symbol.items() if key in allow
         }
-    if not bars_by_symbol:
-        return "_No price analytics available._"
-
-    lines = [
-        "| Symbol | Price | 1d% | 5d% | 20d% | vs 30d High | Vol×Avg |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
-
-    for symbol in sorted(bars_by_symbol):
-        bars = bars_by_symbol[symbol]
+    stats: dict[str, PriceStats] = {}
+    for symbol, bars in bars_by_symbol.items():
         if len(bars) < 2:
             continue
-
         closes = [parse_float_field(b.get("c") or b.get("close")) for b in bars]
+        highs = [parse_float_field(b.get("h") or b.get("high"), closes[i]) for i, b in enumerate(bars)]
+        lows = [parse_float_field(b.get("l") or b.get("low"), closes[i]) for i, b in enumerate(bars)]
         volumes = [parse_float_field(b.get("v") or b.get("volume")) for b in bars]
         price = closes[-1]
         if price <= 0:
             continue
-
-        ret_1d = ((closes[-1] / closes[-2]) - 1.0) * 100.0 if len(closes) >= 2 else 0.0
-        ret_5d = ((closes[-1] / closes[-6]) - 1.0) * 100.0 if len(closes) >= 6 else 0.0
-        ret_20d = ((closes[-1] / closes[-21]) - 1.0) * 100.0 if len(closes) >= 21 else 0.0
+        ret_1d = ((closes[-1] / closes[-2]) - 1.0) * 100.0 if len(closes) >= 2 and closes[-2] else 0.0
+        ret_5d = ((closes[-1] / closes[-6]) - 1.0) * 100.0 if len(closes) >= 6 and closes[-6] else 0.0
+        ret_20d = ((closes[-1] / closes[-21]) - 1.0) * 100.0 if len(closes) >= 21 and closes[-21] else 0.0
         high_30 = max(closes)
         dist_high = ((price / high_30) - 1.0) * 100.0 if high_30 > 0 else 0.0
         recent_vols = volumes[-20:] or volumes
         vol_avg = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
         vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1.0
-
-        lines.append(
-            f"| {symbol} | ${price:.2f} | {ret_1d:+.1f}% | {ret_5d:+.1f}% | "
-            f"{ret_20d:+.1f}% | {dist_high:+.1f}% | {vol_ratio:.1f}x |"
+        true_ranges: list[float] = []
+        for i in range(1, len(bars)):
+            prev_close = closes[i - 1]
+            tr = max(highs[i] - lows[i], abs(highs[i] - prev_close), abs(lows[i] - prev_close))
+            true_ranges.append(tr)
+        atr_window = true_ranges[-14:] or true_ranges
+        atr = sum(atr_window) / len(atr_window) if atr_window else 0.0
+        rets: list[float] = []
+        for i in range(1, len(closes)):
+            if closes[i - 1] > 0:
+                rets.append(closes[i] / closes[i - 1] - 1.0)
+        sample = rets[-20:] or rets
+        if len(sample) >= 2:
+            avg = sum(sample) / len(sample)
+            var = sum((r - avg) ** 2 for r in sample) / (len(sample) - 1)
+            realized_vol = math.sqrt(var) * math.sqrt(252.0)
+        else:
+            realized_vol = 0.0
+        dollar_adv = 0.0
+        if recent_vols:
+            recent_closes = closes[-len(recent_vols) :]
+            dollar_adv = sum(c * v for c, v in zip(recent_closes, recent_vols)) / len(recent_vols)
+        stats[symbol] = PriceStats(
+            symbol=symbol,
+            price=price,
+            ret_1d=ret_1d,
+            ret_5d=ret_5d,
+            ret_20d=ret_20d,
+            dist_high=dist_high,
+            vol_ratio=vol_ratio,
+            atr=atr,
+            realized_vol=realized_vol,
+            adv_shares=vol_avg,
+            dollar_adv=dollar_adv,
         )
+    return stats
 
-    if len(lines) <= 2:
+
+def compute_price_analytics(
+    bars_json: str,
+    symbols: list[str] | None = None,
+    *,
+    earnings: dict[str, str] | None = None,
+) -> str:
+    """Build a compact markdown table from bar data."""
+    stats = compute_price_stats(bars_json, symbols)
+    if not stats:
         return "_No price analytics available._"
+
+    lines = [
+        "| Symbol | Price | 1d% | 5d% | 20d% | ATR | Vol (ann) | ADV $ | vs 30d High | Earn |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for symbol in sorted(stats):
+        row = stats[symbol]
+        earn = (earnings or {}).get(symbol, "—")
+        lines.append(
+            f"| {symbol} | ${row.price:.2f} | {row.ret_1d:+.1f}% | {row.ret_5d:+.1f}% | "
+            f"{row.ret_20d:+.1f}% | ${row.atr:.2f} | {row.realized_vol * 100:.0f}% | "
+            f"${row.dollar_adv/1e6:.1f}M | {row.dist_high:+.1f}% | {earn} |"
+        )
     return "\n".join(lines)
 
 

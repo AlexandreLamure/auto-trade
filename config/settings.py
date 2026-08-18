@@ -112,8 +112,8 @@ class Settings(BaseSettings):
     min_order_confidence: float = Field(
         0.55, description="Minimum mean persona confidence for a surviving order"
     )
-    require_catalyst_or_setup: bool = Field(
-        True, description="New buys need a matching event unless extra traders agree"
+    earnings_blackout_days: int = Field(
+        5, description="Treat earnings/guidance events this recent as an earnings window"
     )
 
     # Event query (trading agent reads from store)

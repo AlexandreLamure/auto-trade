@@ -212,6 +212,7 @@ auto-trade/
 | `MIN_AGREEING_PERSONAS` | `2` | Traders who must agree on side for an order to survive |
 | `MIN_ORDER_CONFIDENCE` | `0.55` | Minimum mean persona confidence for a surviving order |
 | `REQUIRE_CATALYST_OR_SETUP` | `true` | New buys need a matching event unless extra traders agree |
+| `EARNINGS_BLACKOUT_DAYS` | `5` | Recent earnings/guidance events count as an earnings window |
 | `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
 

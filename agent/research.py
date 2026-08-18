@@ -31,7 +31,9 @@ from servers.portfolio import (
 )
 from agent.personas import HORIZON_DAYS
 from agent.workflow import (
+    PriceStats,
     compute_price_analytics,
+    compute_price_stats,
     expand_symbol_universe,
     filter_liquid_candidates,
     parse_latest_prices,
@@ -67,6 +69,8 @@ class ResearchBrief:
     market_events: list[MarketEvent] = field(default_factory=list)
     holdings: list[Position] = field(default_factory=list)
     holdings_markdown: str = ""
+    price_stats: dict[str, PriceStats] = field(default_factory=dict)
+    earnings_flags: dict[str, str] = field(default_factory=dict)
 
     def to_prompt_context(self) -> str:
         return self.summary_markdown
@@ -216,6 +220,36 @@ def load_market_events(
     return body, all_events
 
 
+def earnings_flags_from_events(
+    events: list[MarketEvent],
+    symbols: list[str],
+    *,
+    within_days: int,
+) -> dict[str, str]:
+    """Mark names with a recent earnings/guidance event in the lookback window."""
+    from datetime import timedelta
+
+    from util.time import utcnow
+
+    allow = {s.upper() for s in symbols}
+    cutoff = utcnow() - timedelta(days=within_days)
+    flags: dict[str, str] = {}
+    for event in events:
+        kind = (event.event_type or "").lower().replace("-", "_")
+        if kind not in ("earnings", "guidance"):
+            continue
+        seen = event.last_seen_at
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        if seen < cutoff:
+            continue
+        for ticker in event.tickers:
+            sym = ticker.upper()
+            if sym in allow:
+                flags[sym] = "recent"
+    return flags
+
+
 def _discover_symbols_from_events(settings: Settings, held: list[str]) -> list[str]:
     path = Path(settings.event_store_path)
     if not path.exists():
@@ -352,7 +386,20 @@ async def run_deep_research(
                 min_adv_shares=settings.min_adv_shares,
             )
             all_symbols = list(dict.fromkeys(held + candidates))
-        price_analytics_markdown = compute_price_analytics(bars, all_symbols)
+
+    events_text, market_events = load_market_events(all_symbols, settings)
+    sections["market_events"] = events_text
+    earn_flags = earnings_flags_from_events(
+        market_events,
+        all_symbols,
+        within_days=settings.earnings_blackout_days,
+    )
+    price_stats: dict[str, PriceStats] = {}
+    if bars:
+        price_stats = compute_price_stats(bars, all_symbols)
+        price_analytics_markdown = compute_price_analytics(
+            bars, all_symbols, earnings=earn_flags
+        )
         sections["price_analytics"] = price_analytics_markdown
 
     for pos in holdings:
@@ -362,9 +409,6 @@ async def run_deep_research(
             pos.market_value = pos.current_price * abs(pos.qty)
     holdings_markdown = format_holdings_table(holdings, equity=equity)
     sections["holdings"] = holdings_markdown
-
-    events_text, market_events = load_market_events(all_symbols, settings)
-    sections["market_events"] = events_text
 
     summary = _build_summary(
         held=held,
@@ -392,6 +436,8 @@ async def run_deep_research(
         market_events=market_events,
         holdings=holdings,
         holdings_markdown=holdings_markdown,
+        price_stats=price_stats,
+        earnings_flags=earn_flags,
     )
 
 
@@ -420,7 +466,11 @@ async def enrich_brief_prices(
         tool_call_log=brief.tool_call_log,
     )
     new_prices = parse_latest_prices(bars)
-    extra_analytics = compute_price_analytics(bars)
+    extra_stats = compute_price_stats(bars)
+    extra_analytics = compute_price_analytics(bars, earnings=brief.earnings_flags)
+
+    updated_prices = {**brief.latest_prices, **new_prices}
+    updated_stats = {**brief.price_stats, **extra_stats}
 
     updated_prices = {**brief.latest_prices, **new_prices}
     combined_analytics = brief.price_analytics_markdown
@@ -438,5 +488,6 @@ async def enrich_brief_prices(
         all_symbols=all_symbols,
         latest_prices=updated_prices,
         price_analytics_markdown=combined_analytics,
+        price_stats=updated_stats,
         raw_sections=sections,
     )
