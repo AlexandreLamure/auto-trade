@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from config.settings import Settings
 from servers.manager import MCPManager
 from agent.decision import PortfolioDecision, TradeOrder
-from agent.workflow import format_mcp_summary, is_market_open
+from agent.workflow import format_mcp_summary, should_run_trading_cycle
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import build_validation_context, validate_orders
@@ -39,6 +39,39 @@ class AgentOrchestrator:
         )
         _validate_settings(settings)
 
+    async def _refresh_news_if_stale(self, log: CycleLog) -> None:
+        """Run a news cycle when the event store is missing or older than the stale window."""
+        from datetime import timedelta
+        from pathlib import Path
+
+        from news.pipeline import run_cycle
+        from store import init_db, latest_event_activity
+        from util.time import utcnow
+
+        path = Path(self._settings.event_store_path)
+        max_age = timedelta(minutes=self._settings.news_stale_minutes)
+        activity = None
+        if path.exists():
+            init_db(str(path))
+            activity = latest_event_activity(str(path))
+        if activity is not None:
+            if activity.tzinfo is None:
+                activity = activity.replace(tzinfo=timezone.utc)
+            if utcnow() - activity <= max_age:
+                log.line(
+                    f"Event store fresh (last activity {activity.strftime('%Y-%m-%d %H:%M UTC')})"
+                )
+                return
+        log.section("News refresh")
+        if activity is None:
+            log.line("Event store empty or missing – running news cycle first")
+        else:
+            log.line(
+                f"Event store stale (last activity {activity.strftime('%Y-%m-%d %H:%M UTC')}) "
+                "– running news cycle first"
+            )
+        await run_cycle(self._settings)
+
     async def run_cycle(self) -> None:
         """Execute one full analysis-and-trade cycle."""
         started_at = datetime.now(timezone.utc)
@@ -51,10 +84,11 @@ class AgentOrchestrator:
 
         try:
             async with MCPManager(self._settings) as manager:
-                market_open, clock_detail = await is_market_open(manager)
-                if not market_open:
+                tradable, clock_detail = await should_run_trading_cycle(manager)
+                if not tradable:
                     log.line(f"SKIP – {clock_detail}")
                     return
+                await self._refresh_news_if_stale(log)
                 await self._run_committee_cycle(manager, log)
 
         except Exception as exc:  # noqa: BLE001

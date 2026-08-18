@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 from servers.portfolio import (
@@ -13,6 +14,7 @@ from servers.portfolio import (
     unwrap_alpaca_payload,
 )
 from util.text import truncate_text
+from util.time import parse_iso
 
 if TYPE_CHECKING:
     from servers.manager import MCPManager
@@ -20,32 +22,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def parse_market_clock(result_text: str) -> tuple[bool | None, str]:
-    """Parse a get_clock response into (is_open, detail). is_open is None if unparseable."""
+def parse_market_clock(
+    result_text: str,
+) -> tuple[bool | None, str, datetime | None]:
+    """Parse get_clock into (is_open, detail, next_open). is_open is None if unparseable."""
     if result_text.startswith("ERROR"):
-        return None, truncate_text(result_text, 200)
+        return None, truncate_text(result_text, 200), None
 
     raw = parse_mcp_json(result_text)
     if raw is None:
-        return None, "could not parse clock response"
+        return None, "could not parse clock response", None
 
     payload = unwrap_alpaca_payload(raw)
     if not isinstance(payload, dict):
-        return None, truncate_text(result_text, 200)
+        return None, truncate_text(result_text, 200), None
 
     is_open = payload.get("is_open")
     if not isinstance(is_open, bool):
-        return None, truncate_text(result_text, 200)
+        return None, truncate_text(result_text, 200), None
 
-    next_open = payload.get("next_open") or "?"
+    next_open_raw = payload.get("next_open") or "?"
     next_close = payload.get("next_close") or "?"
+    next_open_dt = parse_iso(str(next_open_raw)) if next_open_raw != "?" else None
     if is_open:
-        return True, f"open until {next_close}"
-    return False, f"next open {next_open}"
+        return True, f"open until {next_close}", next_open_dt
+    return False, f"next open {next_open_raw}", next_open_dt
 
 
 async def is_market_open(manager: MCPManager) -> tuple[bool, str]:
     """Return whether the US equity market is open, plus a short status line."""
+    tradable, detail = await should_run_trading_cycle(manager, open_grace_minutes=0)
+    return tradable, detail
+
+
+async def should_run_trading_cycle(
+    manager: MCPManager, *, open_grace_minutes: int = 20
+) -> tuple[bool, str]:
+    """True if the cash session is open or opens within *open_grace_minutes*."""
     try:
         result = await manager.call_tool("get_clock", {})
         result_text = manager.result_to_text(result)
@@ -53,13 +66,19 @@ async def is_market_open(manager: MCPManager) -> tuple[bool, str]:
         logger.warning("get_clock failed: %s", exc)
         return False, f"clock check failed ({exc})"
 
-    is_open, detail = parse_market_clock(result_text)
+    is_open, detail, next_open = parse_market_clock(result_text)
     if is_open is None:
         logger.warning("Could not parse market clock: %s", detail)
         return False, f"clock response unparseable ({detail})"
-    if not is_open:
-        return False, f"market closed ({detail})"
-    return True, detail
+    if is_open:
+        return True, detail
+    if next_open is not None and open_grace_minutes > 0:
+        if next_open.tzinfo is None:
+            next_open = next_open.replace(tzinfo=timezone.utc)
+        delta_min = (next_open - datetime.now(timezone.utc)).total_seconds() / 60.0
+        if 0 <= delta_min <= open_grace_minutes:
+            return True, f"opens in {delta_min:.0f}m ({detail})"
+    return False, f"market closed ({detail})"
 
 
 def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str:

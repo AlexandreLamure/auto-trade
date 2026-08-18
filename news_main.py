@@ -1,8 +1,9 @@
 """
 Entry point for the news analysis service.
 
-Runs every NEWS_LOOP_INTERVAL_HOURS (default 6), fetching news from
-configured sources, grouping into market events, and storing in SQLite.
+Runs on the US cash session by default (09:20 and 12:50 ET weekdays),
+fetching news from configured sources, grouping into market events, and
+storing in SQLite. Set SESSION_SCHEDULE=false to use NEWS_LOOP_INTERVAL_HOURS.
 
 Usage:
     python news_main.py              # continuous 6-hour schedule
@@ -20,6 +21,7 @@ from config.settings import settings
 from news.pipeline import run_cycle
 from run_service import configure_stderr_logging, run_scheduled_service
 from util.cycle_log import init_news_log
+from util.session import during_regular_hours, parse_session_times
 
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
@@ -62,7 +64,8 @@ def main() -> None:
 
     news_log.line(
         f"News service started | model={settings.ollama_model} | "
-        f"interval={settings.news_loop_interval_hours}h | store={settings.event_store_path}"
+        f"store={settings.event_store_path} | "
+        f"schedule={'session ' + settings.news_session_times if settings.session_schedule else str(settings.news_loop_interval_hours) + 'h'}"
     )
     news_log.line(
         f"Sources: RSS, Reddit={settings.enable_reddit}, Polymarket={settings.enable_polymarket}, "
@@ -72,6 +75,22 @@ def main() -> None:
 
     if args.once:
         asyncio.run(_run_once())
+    elif settings.session_schedule:
+        cron_times = parse_session_times(settings.news_session_times)
+        asyncio.run(
+            run_scheduled_service(
+                job_fn=run_cycle,
+                cron_times=cron_times,
+                timezone=settings.market_timezone,
+                job_id="news_cycle",
+                job_name="News analysis cycle",
+                job_kwargs={"settings": settings},
+                run_immediately=during_regular_hours(
+                    settings.market_timezone, start_hour=8, end_hour=16
+                ),
+                misfire_grace_time=1800,
+            )
+        )
     else:
         asyncio.run(
             run_scheduled_service(

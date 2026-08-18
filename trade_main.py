@@ -2,7 +2,7 @@
 Entry point for the autonomous trading agent.
 
 Starts an APScheduler async scheduler that triggers AgentOrchestrator.run_cycle()
-on the configured interval (default: every 6 hours via LOOP_INTERVAL_HOURS).
+on the configured US cash-session times (default 09:40 and 13:00 ET weekdays).
 
 Usage:
     python trade_main.py              # runs on the configured schedule
@@ -19,6 +19,7 @@ from config.settings import settings
 from agent.orchestrator import AgentOrchestrator
 from run_service import configure_stderr_logging, run_scheduled_service
 from util.cycle_log import init_trading_log
+from util.session import during_regular_hours, parse_session_times
 
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
 
@@ -39,13 +40,27 @@ def main() -> None:
 
     log.line(
         f"Trading agent started | model={settings.ollama_model} | "
-        f"interval={settings.loop_interval_hours}h | paper={settings.alpaca_paper_trade}"
+        f"paper={settings.alpaca_paper_trade} | "
+        f"schedule={'session ' + settings.trade_session_times if settings.session_schedule else str(settings.loop_interval_hours) + 'h'}"
     )
 
     orchestrator = AgentOrchestrator(settings)
 
     if args.once:
         asyncio.run(orchestrator.run_cycle())
+    elif settings.session_schedule:
+        cron_times = parse_session_times(settings.trade_session_times)
+        asyncio.run(
+            run_scheduled_service(
+                job_fn=orchestrator.run_cycle,
+                cron_times=cron_times,
+                timezone=settings.market_timezone,
+                job_id="trading_cycle",
+                job_name="Autonomous trading cycle",
+                run_immediately=during_regular_hours(settings.market_timezone),
+                misfire_grace_time=1800,
+            )
+        )
     else:
         asyncio.run(
             run_scheduled_service(

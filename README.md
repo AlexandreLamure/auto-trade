@@ -3,7 +3,8 @@
 A fully local autonomous stock trading agent that uses a local LLM (via Ollama),
 Alpaca paper trading, and MCP tool servers. A multi-agent investment committee
 performs deep research, debates the best move, and rebalances the paper portfolio
-toward 30-day PnL — up to 10 minutes per cycle, repeated every 6 hours by default.
+toward 30-day PnL — up to 10 minutes per cycle, on the US cash session by default
+(news before the open, trade at/after the open, optional afternoon review).
 
 Market intelligence is provided by a **separate news analysis service** that
 continuously fetches news, groups articles into market events, and stores
@@ -14,13 +15,13 @@ structured summaries in a shared SQLite event store.
 ## Architecture
 
 ```
-news_main.py  (APScheduler, default every 6 hours)
+news_main.py  (session cron: 09:20 and 12:50 ET, weekdays)
   └── news/pipeline.py
        ├── news/collector.py       (APIs + RSS feeds)
        ├── news/analyzer.py        (dedupe, group, LLM enrich)
        └── store/events.py         → data/events.db
 
-trade_main.py  (APScheduler, default every 6 hours)
+trade_main.py  (session cron: 09:40 and 13:00 ET, weekdays)
   └── agent/orchestrator.py
        ├── agent/research.py        (Phase 1: Alpaca data + event store query)
        ├── agent/deliberation.py    (Phase 2: 4 traders + chair debate)
@@ -32,14 +33,15 @@ trade_main.py  (APScheduler, default every 6 hours)
             └── servers/alpaca.py   → alpaca-mcp-server (stdio)
 ```
 
-**News service** (every 6 hours): resolves a dynamic watchlist from Alpaca (held
-positions + top market movers, same as the trading agent); fetches from RSS
+**News service** (09:20 and 12:50 ET weekdays): resolves a dynamic watchlist from Alpaca (held
+positions + gainers/losers + event tickers, same as the trading agent); fetches from RSS
 (first-class), NewsAPI, Finnhub, Alpha Vantage, and Marketaux; deduplicates
 articles; groups into market events; LLM-enriches each event with summary,
 sentiment, importance, and tickers.
 
-**Trading agent** (every 6 hours): reads portfolio data from Alpaca and market events
-from the event store — no live news fetching during deliberation.
+**Trading agent** (09:40 and 13:00 ET weekdays): refreshes news if the event store is stale,
+then reads portfolio data from Alpaca and market events from the store. Cycles still
+run if the cash session opens within 20 minutes so the open is not skipped.
 
 ---
 
@@ -186,12 +188,17 @@ auto-trade/
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
 | `OLLAMA_MODEL` | `qwen2.5:7b` | Model name |
 | `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
-| `NEWS_LOOP_INTERVAL_HOURS` | `6` | News service interval (hours) |
+| `NEWS_LOOP_INTERVAL_HOURS` | `6` | Fallback news interval if `SESSION_SCHEDULE=false` |
+| `LOOP_INTERVAL_HOURS` | `6` | Fallback trading interval if `SESSION_SCHEDULE=false` |
+| `SESSION_SCHEDULE` | `true` | Use US cash-session cron times instead of a raw interval |
+| `MARKET_TIMEZONE` | `America/New_York` | Timezone for session cron |
+| `NEWS_SESSION_TIMES` | `09:20,12:50` | Weekday ET news runs |
+| `TRADE_SESSION_TIMES` | `09:40,13:00` | Weekday ET trading runs |
+| `NEWS_STALE_MINUTES` | `90` | Refresh news before a trade if the store is older |
 | `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
 | `FINNHUB_API_KEY` | – | Finnhub key (optional) |
 | `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
 | `MARKETAUX_API_KEY` | – | Marketaux key (optional) |
-| `LOOP_INTERVAL_HOURS` | `6` | Trading agent interval (hours) |
 | `RESEARCH_SYMBOL_COUNT` | `15` | Max candidate symbols after dedup |
 | `MOVER_CANDIDATE_SLOTS` | `6` | Slots reserved for gainers and losers |
 | `EVENT_CANDIDATE_SLOTS` | `6` | Slots reserved for event-discovered tickers |
