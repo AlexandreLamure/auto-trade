@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     min_order_confidence: float = Field(
         0.55, description="Minimum mean persona confidence for a surviving order"
     )
+    require_catalyst_or_setup: bool = Field(
+        True, description="New buys need a matching event unless extra traders agree"
+    )
     earnings_blackout_days: int = Field(
         5, description="Treat earnings/guidance events this recent as an earnings window"
     )
@@ -131,6 +134,20 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(
         0.20, description="Max fraction of portfolio equity per name (0–1)"
     )
+    block_earnings_buys: bool = Field(
+        True, description="Reject new buys while a name is in the earnings window"
+    )
+    stop_atr_multiple: float = Field(
+        2.0, description="Stop distance as a multiple of 14-day ATR"
+    )
+    stop_pct: float = Field(0.08, description="Minimum stop distance as a fraction of price")
+    risk_per_name_pct: float = Field(
+        0.005, description="Equity fraction risked per name (vol-aware size)"
+    )
+    time_stop_days: int = Field(
+        30, description="Sell held losers at or past this many days (0 disables)"
+    )
+    enable_stops: bool = Field(True, description="Attach a stop after each buy fill")
 
     # LLM thinking mode (Qwen3 etc.)
     enable_thinking: bool = Field(True, description="Enable LLM thinking/reasoning mode")

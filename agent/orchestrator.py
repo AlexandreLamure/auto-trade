@@ -20,7 +20,12 @@ from agent.decision import PortfolioDecision, TradeOrder
 from agent.workflow import format_mcp_summary, should_run_trading_cycle
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
-from agent.risk import build_validation_context, validate_orders
+from agent.risk import (
+    build_validation_context,
+    inject_time_stops,
+    stop_distance,
+    validate_orders,
+)
 from store import MarketEvent
 from util.cycle_log import CycleLog, get_trading_log
 from util.llm_client import OllamaClient
@@ -126,14 +131,23 @@ class AgentOrchestrator:
             positions_json=brief.raw_sections.get("positions", ""),
             latest_prices=brief.latest_prices,
             portfolio_equity=brief.portfolio_equity,
+            price_stats=brief.price_stats,
+            earnings_flags=brief.earnings_flags,
         )
-        approved, rejections = validate_orders(portfolio_decision.orders, ctx)
+        gated_orders = inject_time_stops(
+            portfolio_decision.orders,
+            brief.holdings,
+            time_stop_days=self._settings.time_stop_days,
+        )
+        approved, rejections = validate_orders(gated_orders, ctx)
         if rejections:
             logger.warning("Order validation notes: %s", "; ".join(rejections))
+            for note in rejections:
+                log.line(f"Risk: {note}")
 
         log.section("Execution")
         if approved:
-            await self._execute_portfolio(manager, approved, log)
+            await self._execute_portfolio(manager, approved, log, brief)
         else:
             log.line("HOLD – no orders executed")
 
@@ -142,19 +156,33 @@ class AgentOrchestrator:
         manager: MCPManager,
         orders: list[TradeOrder],
         log: CycleLog,
+        brief: ResearchBrief,
     ) -> None:
         for order in orders:
             try:
-                result = await manager.call_tool(
-                    "place_stock_order",
-                    {
-                        "symbol": order.symbol,
-                        "side": order.side,
-                        "qty": str(int(order.quantity)),
-                        "type": "market",
-                        "time_in_force": "day",
-                    },
-                )
+                payload: dict[str, str] = {
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "qty": str(int(order.quantity)),
+                    "type": "market",
+                    "time_in_force": "day",
+                }
+                if (
+                    order.side == "buy"
+                    and self._settings.enable_stops
+                ):
+                    price = brief.latest_prices.get(order.symbol, 0.0)
+                    if price > 0:
+                        dist = stop_distance(
+                            price,
+                            brief.price_stats.get(order.symbol),
+                            stop_atr_multiple=self._settings.stop_atr_multiple,
+                            stop_pct=self._settings.stop_pct,
+                        )
+                        stop_px = round(price - dist, 2)
+                        if 0 < stop_px < price:
+                            payload["stop_loss_stop_price"] = str(stop_px)
+                result = await manager.call_tool("place_stock_order", payload)
                 result_text = manager.result_to_text(result)
                 failed = bool(result.isError) or result_text.startswith("ERROR")
                 summary = format_mcp_summary(

@@ -213,6 +213,12 @@ auto-trade/
 | `MIN_ORDER_CONFIDENCE` | `0.55` | Minimum mean persona confidence for a surviving order |
 | `REQUIRE_CATALYST_OR_SETUP` | `true` | New buys need a matching event unless extra traders agree |
 | `EARNINGS_BLACKOUT_DAYS` | `5` | Recent earnings/guidance events count as an earnings window |
+| `BLOCK_EARNINGS_BUYS` | `true` | Reject new buys in the earnings window |
+| `STOP_ATR_MULTIPLE` | `2.0` | Stop distance as a multiple of 14-day ATR |
+| `STOP_PCT` | `0.08` | Minimum stop distance as a fraction of price |
+| `RISK_PER_NAME_PCT` | `0.005` | Equity fraction risked per name (vol-aware size) |
+| `TIME_STOP_DAYS` | `30` | Sell held losers at or past this many days |
+| `ENABLE_STOPS` | `true` | Attach a stop after each buy |
 | `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
 

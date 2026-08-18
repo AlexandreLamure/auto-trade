@@ -10,7 +10,8 @@ from dataclasses import dataclass
 
 from agent.decision import TradeOrder
 from config.settings import Settings
-from servers.portfolio import parse_positions
+from servers.portfolio import Position, parse_positions
+from agent.workflow import PriceStats
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,57 @@ class ValidationContext:
     latest_prices: dict[str, float]
     max_position_pct: float
     max_orders: int
+    price_stats: dict[str, PriceStats]
+    earnings_flags: dict[str, str]
+    risk_per_name_pct: float
+    stop_atr_multiple: float
+    stop_pct: float
+    block_earnings_buys: bool
+
+
+def stop_distance(
+    price: float,
+    stats: PriceStats | None,
+    *,
+    stop_atr_multiple: float,
+    stop_pct: float,
+) -> float:
+    """Dollar distance from price to stop, using ATR with a percent floor."""
+    atr_stop = (stats.atr * stop_atr_multiple) if stats and stats.atr > 0 else 0.0
+    pct_stop = price * stop_pct
+    return max(atr_stop, pct_stop, price * 0.02)
+
+
+def inject_time_stops(
+    orders: list[TradeOrder],
+    holdings: list[Position],
+    *,
+    time_stop_days: int,
+) -> list[TradeOrder]:
+    """Add full sells for held losers at or past the horizon."""
+    if time_stop_days <= 0:
+        return orders
+    already = {(o.symbol, o.side) for o in orders}
+    extra: list[TradeOrder] = []
+    for pos in holdings:
+        if pos.days_held is None or pos.days_held < time_stop_days:
+            continue
+        plpc = pos.unrealized_plpc
+        if abs(plpc) > 2:
+            plpc = plpc / 100.0
+        if plpc >= 0:
+            continue
+        if (pos.symbol, "sell") in already:
+            continue
+        extra.append(
+            TradeOrder(
+                symbol=pos.symbol,
+                side="sell",
+                quantity=pos.qty,
+                rationale=f"time-stop: held {pos.days_held}d with {plpc:.1%} PnL",
+            )
+        )
+    return extra + orders
 
 
 def parse_held_quantities(positions_json: str) -> dict[str, float]:
@@ -119,6 +171,12 @@ def validate_orders(
             rejections.append(f"BUY {order.symbol}: insufficient cash")
             continue
 
+        if ctx.block_earnings_buys and order.symbol in ctx.earnings_flags:
+            rejections.append(
+                f"BUY {order.symbol}: earnings window ({ctx.earnings_flags[order.symbol]})"
+            )
+            continue
+
         price = ctx.latest_prices.get(order.symbol)
         qty = order.quantity
         if not price or price <= 0:
@@ -130,13 +188,22 @@ def validate_orders(
         existing_mv = ctx.held_market_value.get(order.symbol, 0.0)
         existing_mv -= sold_notional.get(order.symbol, 0.0)
         room = max(0.0, max_name_notional - max(0.0, existing_mv))
+        stats = ctx.price_stats.get(order.symbol)
+        stop_dist = stop_distance(
+            price,
+            stats,
+            stop_atr_multiple=ctx.stop_atr_multiple,
+            stop_pct=ctx.stop_pct,
+        )
+        risk_budget = equity * ctx.risk_per_name_pct if ctx.risk_per_name_pct > 0 else room
+        vol_shares = math.floor(risk_budget / stop_dist) if stop_dist > 0 else qty
         max_shares = math.floor(room / price) if room > 0 else 0
         max_affordable = math.floor(cash_remaining / price)
-        capped = min(qty, max_shares, max_affordable)
+        capped = min(qty, max_shares, max_affordable, vol_shares)
         if capped < qty:
             rejections.append(
                 f"BUY {order.symbol}: reduced qty {qty:g} → {capped:g} "
-                f"(max {ctx.max_position_pct:.0%} of equity @ ${price:.2f})"
+                f"(equity cap / vol-aware stop ${stop_dist:.2f})"
             )
         qty = capped
 
@@ -172,6 +239,8 @@ def build_validation_context(
     positions_json: str,
     latest_prices: dict[str, float] | None = None,
     portfolio_equity: float = 0.0,
+    price_stats: dict[str, PriceStats] | None = None,
+    earnings_flags: dict[str, str] | None = None,
 ) -> ValidationContext:
     prices = latest_prices or {}
     holdings = parse_positions(positions_json)
@@ -191,4 +260,10 @@ def build_validation_context(
         latest_prices=prices,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
+        price_stats=price_stats or {},
+        earnings_flags=earnings_flags or {},
+        risk_per_name_pct=settings.risk_per_name_pct,
+        stop_atr_multiple=settings.stop_atr_multiple,
+        stop_pct=settings.stop_pct,
+        block_earnings_buys=settings.block_earnings_buys,
     )
