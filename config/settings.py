@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     )
     max_cycle_seconds: int = Field(600, description="Hard cap on committee cycle duration (seconds)")
     max_orders_per_cycle: int = Field(3, description="Max Alpaca orders per committee cycle")
+    min_agreeing_personas: int = Field(
+        2, description="Minimum traders who must agree on side before an order survives"
+    )
+    min_order_confidence: float = Field(
+        0.55, description="Minimum mean persona confidence for a surviving order"
+    )
+    require_catalyst_or_setup: bool = Field(
+        True, description="New buys need a matching event unless extra traders agree"
+    )
 
     # Event query (trading agent reads from store)
     events_since_hours: int = Field(72, description="How far back to query market events")

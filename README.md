@@ -208,7 +208,10 @@ auto-trade/
 | `EVENTS_MIN_IMPORTANCE` | `2` | Min importance for symbol events |
 | `ENABLE_DEBATE_ROUND` | `true` | Run Round 2 trader debate before chair |
 | `MAX_CYCLE_SECONDS` | `600` | Max cycle duration (10 minutes) |
-| `MAX_ORDERS_PER_CYCLE` | `3` | Max orders per rebalancing cycle |
+| `MAX_ORDERS_PER_CYCLE` | `3` | Max Alpaca orders per committee cycle |
+| `MIN_AGREEING_PERSONAS` | `2` | Traders who must agree on side for an order to survive |
+| `MIN_ORDER_CONFIDENCE` | `0.55` | Minimum mean persona confidence for a surviving order |
+| `REQUIRE_CATALYST_OR_SETUP` | `true` | New buys need a matching event unless extra traders agree |
 | `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
 

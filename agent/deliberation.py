@@ -30,6 +30,7 @@ from agent.personas import (
     build_chair_persona,
     build_trader_personas,
 )
+from agent.consensus import apply_consensus_gate
 from agent.research import ResearchBrief
 from util.cycle_log import CycleLog
 from util.llm_client import OllamaClient
@@ -49,10 +50,12 @@ class DeliberationTurn:
 
 
 def _sizing_hint(brief: ResearchBrief, max_position_pct: float) -> str:
-    max_dollars = brief.cash_available * max_position_pct
+    equity = brief.portfolio_equity if brief.portfolio_equity > 0 else brief.cash_available
+    max_dollars = equity * max_position_pct
     return (
-        f"Cash: ${brief.cash_available:,.2f} | Max per buy: ${max_dollars:,.2f} "
-        f"({max_position_pct:.0%} of cash). Size qty to use most of that budget on high-conviction buys."
+        f"Equity: ${equity:,.2f} | Cash: ${brief.cash_available:,.2f} | "
+        f"Max per name: ${max_dollars:,.2f} ({max_position_pct:.0%} of equity). "
+        "HOLD is valid. Size from conviction, not to fill the cap."
     )
 
 
@@ -61,7 +64,7 @@ def _build_round1_user_prompt(
 ) -> str:
     return f"""\
 Analyse the research brief below and submit your independent trading proposal.
-Propose concrete orders — avoid defaulting to HOLD unless you truly see no edge.
+HOLD is acceptable when you do not see a 30-day edge.
 
 {PROPOSAL_JSON_SCHEMA}
 
@@ -81,7 +84,7 @@ def _build_debate_user_prompt(
     proposal_text = json.dumps([proposal_to_dict(p) for p in proposals], indent=2)
     return f"""\
 Review the other traders' Round 1 proposals. Agree or disagree, then submit a revised view.
-Do not retreat to HOLD just because others disagree — defend your thesis with sized orders or propose alternatives.
+You may HOLD. Do not invent orders you cannot defend from the brief.
 
 {DEBATE_JSON_SCHEMA}
 
@@ -114,12 +117,11 @@ As portfolio chair, synthesise the committee debate into a final consensus.
 {CHAIR_JSON_SCHEMA}
 
 Rules:
-- **Default to executing** the best ideas from debate — do not let risk aversion deadlock the committee.
-- Up to {max_orders} orders; prefer 1–{max_orders} actionable orders when any trader had a credible thesis.
-- HOLD (empty list) only when no trader presented a tradeable idea or conditions are clearly adverse.
+- Execute a symbol only when 2+ traders agree on direction with a real thesis.
+- Up to {max_orders} orders. HOLD (empty list) when agreement or catalysts are missing.
 - Net conflicting orders on the same symbol.
-- Size buys to use ~{max_position_pct:.0%} of cash per order ({_sizing_hint(brief, max_position_pct)}).
-- consensus_summary must explain the {HORIZON_DAYS}-day PnL strategy.
+- Size buys up to ~{max_position_pct:.0%} of equity per name ({_sizing_hint(brief, max_position_pct)}).
+- consensus_summary must explain the {HORIZON_DAYS}-day PnL strategy, including why cash is held if it is.
 
 ## Research brief
 {brief.to_prompt_context()}
@@ -225,6 +227,15 @@ async def run_committee(
             )
             rounds.append(turn)
 
+    final_proposals = list(round1_proposals)
+    round2_turns = [t for t in rounds if t.round == 2]
+    if round2_turns:
+        final_proposals = [
+            t.proposal
+            or parse_persona_proposal(t.content, persona=t.persona, extra_text=t.thinking)
+            for t in round2_turns
+        ]
+
     chair_prompt = _build_chair_user_prompt(
         brief,
         rounds,
@@ -249,4 +260,4 @@ async def run_committee(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    return decision
+    return apply_consensus_gate(decision, final_proposals, brief, settings)
