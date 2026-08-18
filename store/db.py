@@ -39,6 +39,53 @@ CREATE TABLE IF NOT EXISTS articles (
 CREATE INDEX IF NOT EXISTS idx_articles_event_id ON articles(event_id);
 CREATE INDEX IF NOT EXISTS idx_articles_url_hash ON articles(url_hash);
 CREATE INDEX IF NOT EXISTS idx_events_last_seen ON events(last_seen_at);
+
+CREATE TABLE IF NOT EXISTS cycles (
+    id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    equity REAL,
+    cash REAL,
+    month_pnl_pct REAL,
+    consensus TEXT,
+    dissent TEXT,
+    brief_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cycle_proposals (
+    id TEXT PRIMARY KEY,
+    cycle_id TEXT NOT NULL REFERENCES cycles(id),
+    persona TEXT NOT NULL DEFAULT '',
+    round INTEGER NOT NULL DEFAULT 1,
+    stance TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    orders_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS cycle_orders (
+    id TEXT PRIMARY KEY,
+    cycle_id TEXT NOT NULL REFERENCES cycles(id),
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    decision_price REAL
+);
+
+CREATE TABLE IF NOT EXISTS cycle_marks (
+    cycle_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    decision_price REAL,
+    started_at TEXT NOT NULL,
+    price_1d REAL,
+    price_5d REAL,
+    price_30d REAL,
+    marked_1d_at TEXT,
+    marked_5d_at TEXT,
+    marked_30d_at TEXT,
+    PRIMARY KEY (cycle_id, symbol)
+);
 """
 
 

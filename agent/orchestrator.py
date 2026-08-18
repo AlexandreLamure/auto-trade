@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from config.settings import Settings
 from servers.manager import MCPManager
-from agent.decision import PortfolioDecision, TradeOrder
+from agent.decision import PortfolioDecision, TradeOrder, order_to_dict, proposal_to_dict
 from agent.workflow import format_mcp_summary, format_order_qty, parse_fractionable, parse_nbbo, should_run_trading_cycle
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
@@ -28,6 +28,7 @@ from agent.risk import (
     validate_orders,
 )
 from store import MarketEvent
+from store.journal import record_cycle, update_marks
 from util.cycle_log import CycleLog, get_trading_log
 from util.llm_client import OllamaClient
 from util.text import truncate_text
@@ -95,7 +96,7 @@ class AgentOrchestrator:
                     log.line(f"SKIP – {clock_detail}")
                     return
                 await self._refresh_news_if_stale(log)
-                await self._run_committee_cycle(manager, log)
+                await self._run_committee_cycle(manager, log, cycle_id)
 
         except Exception as exc:  # noqa: BLE001
             logger.error("Cycle failed: %s", exc, exc_info=True)
@@ -104,15 +105,21 @@ class AgentOrchestrator:
             log.line(f"Duration: {elapsed:.0f}s")
 
     async def _run_committee_cycle(
-        self, manager: MCPManager, log: CycleLog
+        self, manager: MCPManager, log: CycleLog, cycle_id: str
     ) -> None:
         brief = await run_deep_research(manager, self._settings)
+        try:
+            marked = update_marks(self._settings.event_store_path, brief.latest_prices)
+            if marked:
+                log.line(f"Journal: updated {marked} outcome mark(s)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Journal mark update failed: %s", exc)
         _log_portfolio(brief, log)
         _log_mcp_calls(brief, log)
         _log_market_events(brief, self._settings, log)
 
         log.section("Deliberation")
-        portfolio_decision = await run_committee(
+        portfolio_decision, proposals = await run_committee(
             self._llm,
             brief,
             self._settings,
@@ -152,11 +159,32 @@ class AgentOrchestrator:
             for note in rejections:
                 log.line(f"Risk: {note}")
 
+        fills: list[tuple[TradeOrder, str]] = []
         log.section("Execution")
         if approved:
-            await self._execute_portfolio(manager, approved, log, brief)
+            fills = await self._execute_portfolio(manager, approved, log, brief)
         else:
             log.line("HOLD – no orders executed")
+
+        try:
+            record_cycle(
+                self._settings.event_store_path,
+                cycle_id=cycle_id,
+                equity=brief.portfolio_equity,
+                cash=brief.cash_available,
+                month_pnl_pct=brief.month_pnl_pct,
+                consensus=portfolio_decision.consensus_summary,
+                dissent=portfolio_decision.dissent,
+                markdown=brief.summary_markdown,
+                proposals=[proposal_to_dict(p) for p in proposals],
+                proposed=[order_to_dict(o) for o in gated_orders],
+                approved_keys={(o.symbol, o.side) for o in approved},
+                rejections=rejections,
+                fill_status={(o.symbol, o.side): status for o, status in fills},
+                prices=brief.latest_prices,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist decision journal: %s", exc)
 
     async def _execute_portfolio(
         self,
@@ -164,7 +192,8 @@ class AgentOrchestrator:
         orders: list[TradeOrder],
         log: CycleLog,
         brief: ResearchBrief,
-    ) -> None:
+    ) -> list[tuple[TradeOrder, str]]:
+        fills: list[tuple[TradeOrder, str]] = []
         for order in orders:
             try:
                 quote_text = ""
@@ -230,6 +259,7 @@ class AgentOrchestrator:
                     result_text,
                 )
                 status = "failed" if failed else "submitted"
+                fills.append((order, status))
                 log.line(
                     f"{order.side.upper()} {order.symbol} x{qty_str} → {status}"
                 )
@@ -251,6 +281,8 @@ class AgentOrchestrator:
                 log.line(
                     f"{order.side.upper()} {order.symbol} x{order.quantity:g} → error"
                 )
+                fills.append((order, "error"))
+        return fills
 
 
 def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:

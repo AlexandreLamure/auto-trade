@@ -182,7 +182,7 @@ async def run_committee(
     settings: Settings,
     *,
     cycle_log: CycleLog | None = None,
-) -> PortfolioDecision:
+) -> tuple[PortfolioDecision, list[PersonaProposal]]:
     """Run multi-round deliberation and return consensus."""
     started = time.monotonic()
     deadline = started + settings.max_cycle_seconds
@@ -266,4 +266,4 @@ async def run_committee(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    return apply_consensus_gate(decision, final_proposals, brief, settings)
+    return apply_consensus_gate(decision, final_proposals, brief, settings), final_proposals

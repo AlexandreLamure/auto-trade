@@ -41,7 +41,8 @@ sentiment, importance, and tickers.
 
 **Trading agent** (09:40 and 13:00 ET weekdays): refreshes news if the event store is stale,
 then reads portfolio data from Alpaca and market events from the store. Cycles still
-run if the cash session opens within 20 minutes so the open is not skipped.
+run if the cash session opens within 20 minutes so the open is not skipped. Each cycle
+writes a decision journal (proposals, fills, later 1d/5d/30d marks) into the event store.
 
 ---
 

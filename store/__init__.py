@@ -1,5 +1,6 @@
 """SQLite event store shared by the news service and trading agent."""
 
+from store.journal import record_cycle, update_marks
 from store.events import (
     MarketEvent,
     StoredArticle,
@@ -34,6 +35,8 @@ __all__ = [
     "latest_event_activity",
     "prune_old_events",
     "query_events",
+    "record_cycle",
     "touch_event_seen",
     "update_event",
+    "update_marks",
 ]
