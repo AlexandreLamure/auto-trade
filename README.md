@@ -209,7 +209,7 @@ auto-trade/
 | `ENABLE_DEBATE_ROUND` | `true` | Run Round 2 trader debate before chair |
 | `MAX_CYCLE_SECONDS` | `600` | Max cycle duration (10 minutes) |
 | `MAX_ORDERS_PER_CYCLE` | `3` | Max orders per rebalancing cycle |
-| `MAX_POSITION_PCT` | `0.20` | Max fraction of cash per buy (20%) |
+| `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
 | `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
 
 The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `agent/personas.py`).

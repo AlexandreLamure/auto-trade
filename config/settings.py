@@ -120,7 +120,7 @@ class Settings(BaseSettings):
 
     # Risk guard
     max_position_pct: float = Field(
-        0.20, description="Max fraction of cash to allocate per buy (0–1)"
+        0.20, description="Max fraction of portfolio equity per name (0–1)"
     )
 
     # LLM thinking mode (Qwen3 etc.)

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from agent.decision import TradeOrder
 from config.settings import Settings
-from servers.portfolio import iter_positions, parse_mcp_json, unwrap_alpaca_payload
+from servers.portfolio import parse_positions
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +18,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ValidationContext:
     cash_available: float
+    portfolio_equity: float
     held_quantities: dict[str, float]
+    held_market_value: dict[str, float]
     latest_prices: dict[str, float]
     max_position_pct: float
     max_orders: int
 
 
 def parse_held_quantities(positions_json: str) -> dict[str, float]:
-    raw = parse_mcp_json(positions_json)
-    if raw is None:
-        return {}
-    return dict(iter_positions(unwrap_alpaca_payload(raw)))
+    return {pos.symbol: pos.qty for pos in parse_positions(positions_json)}
 
 
 def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
@@ -55,30 +54,39 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
     return result
 
 
+def _sells_first(orders: list[TradeOrder]) -> list[TradeOrder]:
+    sells = [o for o in orders if o.side == "sell"]
+    buys = [o for o in orders if o.side != "sell"]
+    return sells + buys
+
+
 def validate_orders(
     orders: list[TradeOrder],
     ctx: ValidationContext,
 ) -> tuple[list[TradeOrder], list[str]]:
-    """Return (approved_orders, rejection_reasons)."""
+    """Return (approved_orders, rejection_reasons). Sells run before buys."""
     rejections: list[str] = []
-    netted = net_orders(orders)
+    netted = _sells_first(net_orders(orders))
 
     if len(netted) > ctx.max_orders:
         rejections.append(
-            f"Too many orders ({len(netted)}); max is {ctx.max_orders}. Keeping first {ctx.max_orders}."
+            f"Too many orders ({len(netted)}); max is {ctx.max_orders}. "
+            "Keeping sells first, then remaining buys."
         )
         netted = netted[: ctx.max_orders]
 
     approved: list[TradeOrder] = []
     cash_remaining = ctx.cash_available
-    max_per_buy = ctx.cash_available * ctx.max_position_pct
-    if max_per_buy <= 0 and any(o.side == "buy" for o in netted):
+    equity = ctx.portfolio_equity if ctx.portfolio_equity > 0 else ctx.cash_available
+    max_name_notional = equity * ctx.max_position_pct
+    if max_name_notional <= 0 and any(o.side == "buy" for o in netted):
         logger.warning(
-            "Buy validation blocked: cash_available=%.2f max_position_pct=%.2f",
-            ctx.cash_available,
+            "Buy validation blocked: equity=%.2f max_position_pct=%.2f",
+            equity,
             ctx.max_position_pct,
         )
     sell_reserved: dict[str, float] = {}
+    sold_notional: dict[str, float] = {}
 
     for order in netted:
         if order.side == "sell":
@@ -90,6 +98,10 @@ def validate_orders(
                 continue
             qty = min(order.quantity, allowed)
             sell_reserved[order.symbol] = already + qty
+            price = ctx.latest_prices.get(order.symbol) or 0.0
+            proceeds = qty * price if price > 0 else 0.0
+            cash_remaining += proceeds
+            sold_notional[order.symbol] = sold_notional.get(order.symbol, 0.0) + proceeds
             approved.append(
                 TradeOrder(
                     symbol=order.symbol,
@@ -98,53 +110,57 @@ def validate_orders(
                     rationale=order.rationale,
                 )
             )
-        else:
-            if max_per_buy <= 0:
-                rejections.append(f"BUY {order.symbol}: max position size is zero")
-                continue
-            if cash_remaining <= 0:
-                rejections.append(f"BUY {order.symbol}: insufficient cash")
-                continue
+            continue
 
-            price = ctx.latest_prices.get(order.symbol)
-            qty = order.quantity
-            if price and price > 0:
-                max_shares = math.floor(max_per_buy / price)
-                max_affordable = math.floor(cash_remaining / price)
-                capped = min(qty, max_shares, max_affordable)
-                if capped < qty:
-                    rejections.append(
-                        f"BUY {order.symbol}: reduced qty {qty:.0f} → {capped:.0f} "
-                        f"(max {ctx.max_position_pct:.0%} of cash @ ${price:.2f})"
-                    )
-                qty = capped
-            else:
-                rejections.append(
-                    f"BUY {order.symbol}: no price data; cannot size order safely"
-                )
-                continue
+        if max_name_notional <= 0:
+            rejections.append(f"BUY {order.symbol}: max position size is zero")
+            continue
+        if cash_remaining <= 0:
+            rejections.append(f"BUY {order.symbol}: insufficient cash")
+            continue
 
-            if qty < 1:
-                rejections.append(
-                    f"BUY {order.symbol}: qty below 1 after cash cap "
-                    f"(price=${price:.2f}, max ${max_per_buy:.2f} per buy)"
-                )
-                continue
-
-            cost = qty * price
-            if cost > cash_remaining:
-                rejections.append(f"BUY {order.symbol}: cost ${cost:.2f} exceeds cash")
-                continue
-
-            approved.append(
-                TradeOrder(
-                    symbol=order.symbol,
-                    side="buy",
-                    quantity=qty,
-                    rationale=order.rationale,
-                )
+        price = ctx.latest_prices.get(order.symbol)
+        qty = order.quantity
+        if not price or price <= 0:
+            rejections.append(
+                f"BUY {order.symbol}: no price data; cannot size order safely"
             )
-            cash_remaining -= cost
+            continue
+
+        existing_mv = ctx.held_market_value.get(order.symbol, 0.0)
+        existing_mv -= sold_notional.get(order.symbol, 0.0)
+        room = max(0.0, max_name_notional - max(0.0, existing_mv))
+        max_shares = math.floor(room / price) if room > 0 else 0
+        max_affordable = math.floor(cash_remaining / price)
+        capped = min(qty, max_shares, max_affordable)
+        if capped < qty:
+            rejections.append(
+                f"BUY {order.symbol}: reduced qty {qty:g} → {capped:g} "
+                f"(max {ctx.max_position_pct:.0%} of equity @ ${price:.2f})"
+            )
+        qty = capped
+
+        if qty < 1:
+            rejections.append(
+                f"BUY {order.symbol}: qty below 1 after equity/cash cap "
+                f"(price=${price:.2f}, max ${max_name_notional:.2f} per name)"
+            )
+            continue
+
+        cost = qty * price
+        if cost > cash_remaining:
+            rejections.append(f"BUY {order.symbol}: cost ${cost:.2f} exceeds cash")
+            continue
+
+        approved.append(
+            TradeOrder(
+                symbol=order.symbol,
+                side="buy",
+                quantity=qty,
+                rationale=order.rationale,
+            )
+        )
+        cash_remaining -= cost
 
     return approved, rejections
 
@@ -155,11 +171,24 @@ def build_validation_context(
     cash_available: float,
     positions_json: str,
     latest_prices: dict[str, float] | None = None,
+    portfolio_equity: float = 0.0,
 ) -> ValidationContext:
+    prices = latest_prices or {}
+    holdings = parse_positions(positions_json)
+    held_qty = {pos.symbol: pos.qty for pos in holdings}
+    held_mv: dict[str, float] = {}
+    for pos in holdings:
+        value = pos.market_value
+        if value <= 0:
+            px = pos.current_price or prices.get(pos.symbol, 0.0)
+            value = abs(pos.qty) * px
+        held_mv[pos.symbol] = value
     return ValidationContext(
         cash_available=cash_available,
-        held_quantities=parse_held_quantities(positions_json),
-        latest_prices=latest_prices or {},
+        portfolio_equity=portfolio_equity,
+        held_quantities=held_qty or parse_held_quantities(positions_json),
+        held_market_value=held_mv,
+        latest_prices=prices,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
     )

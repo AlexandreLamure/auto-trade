@@ -125,6 +125,7 @@ class AgentOrchestrator:
             cash_available=brief.cash_available,
             positions_json=brief.raw_sections.get("positions", ""),
             latest_prices=brief.latest_prices,
+            portfolio_equity=brief.portfolio_equity,
         )
         approved, rejections = validate_orders(portfolio_decision.orders, ctx)
         if rejections:
@@ -155,15 +156,24 @@ class AgentOrchestrator:
                     },
                 )
                 result_text = manager.result_to_text(result)
+                failed = bool(result.isError) or result_text.startswith("ERROR")
                 summary = format_mcp_summary(
                     "place_stock_order",
                     {"symbol": order.symbol, "side": order.side, "qty": int(order.quantity)},
                     result_text,
                 )
+                status = "failed" if failed else "submitted"
                 log.line(
-                    f"{order.side.upper()} {order.symbol} x{order.quantity:.0f} → submitted"
+                    f"{order.side.upper()} {order.symbol} x{order.quantity:.0f} → {status}"
                 )
                 log.line(f"  {summary}")
+                if failed:
+                    logger.warning(
+                        "Order not filled for %s %s: %s",
+                        order.side,
+                        order.symbol,
+                        result_text,
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.error("Trade execution failed for %s: %s", order.symbol, exc)
                 log.line(
