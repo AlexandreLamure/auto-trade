@@ -30,7 +30,7 @@ from agent.personas import (
     build_chair_persona,
     build_trader_personas,
 )
-from agent.consensus import apply_consensus_gate
+from agent.consensus import apply_consensus_gate, format_vote_tally, has_disagreement, tally_proposals
 from agent.research import ResearchBrief
 from util.cycle_log import CycleLog
 from util.llm_client import OllamaClient
@@ -100,34 +100,42 @@ You may HOLD. Do not invent orders you cannot defend from the brief.
 
 def _build_chair_user_prompt(
     brief: ResearchBrief,
-    transcript: list[DeliberationTurn],
+    proposals: list[PersonaProposal],
     *,
     max_position_pct: float,
     max_orders: int,
 ) -> str:
-    debate_lines = []
-    for turn in transcript:
-        debate_lines.append(
-            f"### Round {turn.round} — {turn.persona_name} ({turn.persona})\n{turn.content}"
+    tallies = tally_proposals(proposals)
+    tally_text = format_vote_tally(tallies)
+    point_lines = []
+    for proposal in proposals:
+        points = "; ".join(proposal.key_points[:3]) if proposal.key_points else proposal.commentary[:240]
+        point_lines.append(
+            f"- {proposal.persona} ({proposal.stance}, conf {proposal.confidence:.2f}): {points}"
         )
-    debate_text = "\n\n".join(debate_lines)
+    notes = "\n".join(point_lines) if point_lines else "_No trader notes._"
     return f"""\
-As portfolio chair, synthesise the committee debate into a final consensus.
+As portfolio chair, synthesise the committee votes into a final consensus.
 
 {CHAIR_JSON_SCHEMA}
 
 Rules:
+- Start from the vote tally. Do not invent orders the traders did not support.
 - Execute a symbol only when 2+ traders agree on direction with a real thesis.
 - Up to {max_orders} orders. HOLD (empty list) when agreement or catalysts are missing.
 - Net conflicting orders on the same symbol.
 - Size buys up to ~{max_position_pct:.0%} of equity per name ({_sizing_hint(brief, max_position_pct)}).
+- Use median qty from the agreeing side unless cash/equity caps require less.
 - consensus_summary must explain the {HORIZON_DAYS}-day PnL strategy, including why cash is held if it is.
 
 ## Research brief
 {brief.to_prompt_context()}
 
-## Committee transcript
-{debate_text}"""
+## Vote tally
+{tally_text}
+
+## Trader notes
+{notes}"""
 
 
 async def _call_persona(
@@ -211,21 +219,19 @@ async def run_committee(
     ]
 
     if settings.enable_debate_round and time.monotonic() < deadline:
-        debate_prompt = _build_debate_user_prompt(
-            brief, round1_proposals, max_position_pct=settings.max_position_pct
-        )
-        for persona in traders:
-            if time.monotonic() >= deadline:
-                logger.warning("Cycle time budget exceeded; skipping remaining debate")
-                break
-            turn = await _call_persona(
-                llm,
-                persona,
-                debate_prompt,
-                round_num=2,
-                cycle_log=cycle_log,
+        if has_disagreement(round1_proposals):
+            debate_prompt = _build_debate_user_prompt(
+                brief, round1_proposals, max_position_pct=settings.max_position_pct
             )
-            rounds.append(turn)
+            debate_tasks = [
+                _call_persona(
+                    llm, persona, debate_prompt, round_num=2, cycle_log=cycle_log
+                )
+                for persona in traders
+            ]
+            rounds.extend(await asyncio.gather(*debate_tasks))
+        elif cycle_log is not None:
+            cycle_log.line("Debate skipped – Round 1 had no disagreement")
 
     final_proposals = list(round1_proposals)
     round2_turns = [t for t in rounds if t.round == 2]
@@ -238,7 +244,7 @@ async def run_committee(
 
     chair_prompt = _build_chair_user_prompt(
         brief,
-        rounds,
+        final_proposals,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
     )
