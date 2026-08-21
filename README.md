@@ -165,51 +165,6 @@ auto-trade/
 
 ---
 
-## Configuration reference
-
-| Variable | Default | Description |
-|---|---|---|
-| `ALPACA_API_KEY` | – | Alpaca API key (`PK…` for paper, `AK…` for live) |
-| `ALPACA_SECRET_KEY` | – | Alpaca secret key |
-| `ALPACA_PAPER_TRADE` | `true` | Use paper trading endpoint |
-| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
-| `OLLAMA_MODEL` | `qwen3:14b` | Model name (14B Q4 fits 16GB VRAM) |
-| `OLLAMA_NUM_CTX` | `16384` | Context window — raise above Ollama’s 4096 default |
-| `OLLAMA_TEMPERATURE` | `0.4` | Sampling temperature (below Ollama’s usual ~0.8 default) |
-| `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
-| `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
-| `FINNHUB_API_KEY` | – | Finnhub key (optional) |
-| `ALPHA_VANTAGE_API_KEY` | – | Alpha Vantage key (optional) |
-| `MARKETAUX_API_KEY` | – | Marketaux key (optional) |
-| `RESEARCH_SYMBOL_COUNT` | `15` | Max candidate symbols after dedup |
-| `MOVER_CANDIDATE_SLOTS` | `6` | Slots reserved for gainers and losers |
-| `EVENT_CANDIDATE_SLOTS` | `6` | Slots reserved for event-discovered tickers |
-| `MIN_CANDIDATE_PRICE` | `5.0` | Drop candidates below this last price |
-| `MIN_ADV_SHARES` | `500000` | Drop candidates below this 20-day avg volume |
-| `EVENTS_SINCE_HOURS` | `72` | How far back to query events |
-| `EVENTS_MIN_IMPORTANCE` | `2` | Min importance for symbol events |
-| `ENABLE_DEBATE_ROUND` | `true` | Run Round 2 trader debate before chair |
-| `MAX_CYCLE_SECONDS` | `600` | Max cycle duration (10 minutes) |
-| `MAX_ORDERS_PER_CYCLE` | `3` | Max Alpaca orders per committee cycle |
-| `MIN_AGREEING_PERSONAS` | `2` | Traders who must agree on side for an order to survive |
-| `MIN_ORDER_CONFIDENCE` | `0.55` | Minimum mean persona confidence for a surviving order |
-| `REQUIRE_CATALYST_OR_SETUP` | `true` | New buys need a matching event unless extra traders agree |
-| `EARNINGS_BLACKOUT_DAYS` | `5` | Recent earnings/guidance events count as an earnings window |
-| `BLOCK_EARNINGS_BUYS` | `true` | Reject new buys in the earnings window |
-| `STOP_ATR_MULTIPLE` | `2.0` | Stop distance as a multiple of 14-day ATR |
-| `STOP_PCT` | `0.08` | Minimum stop distance as a fraction of price |
-| `RISK_PER_NAME_PCT` | `0.005` | Equity fraction risked per name (vol-aware size) |
-| `TIME_STOP_DAYS` | `30` | Sell held losers at or past this many days |
-| `ENABLE_STOPS` | `true` | Attach a stop after each buy |
-| `BEARISH_MIN_IMPORTANCE` | `4` | Bearish events at this importance block new names / sell held |
-| `MAX_NEW_NAMES_PER_CYCLE` | `1` | Max new names to buy per cycle |
-| `MAX_POSITION_PCT` | `0.20` | Max fraction of portfolio equity per name (20%) |
-| `ENABLE_THINKING` | `true` | LLM reasoning mode (Qwen3+ models) |
-
-The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `agent/personas.py`).
-
----
-
 ## Notes and limitations
 
 - **Paper trading only by default.** Set `ALPACA_PAPER_TRADE=false` and use live keys to trade with real money — do so at your own risk.
@@ -218,3 +173,4 @@ The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `age
 - RSS feeds run without API keys; optional API keys extend coverage.
 - Model quality matters for JSON-only persona output. `qwen2.5:7b` is the documented minimum; larger models (e.g. Qwen3) work better with `ENABLE_THINKING=true`.
 - Buy orders are capped by `max_position_pct` using latest bar close prices from research.
+- The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `agent/personas.py`).
