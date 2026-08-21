@@ -62,7 +62,9 @@ def _build_source_tasks(settings: Settings, watchlist: list[str]) -> list[Source
             "reddit",
             lambda: fetch_reddit(
                 watchlist_tickers=watchlist,
-                user_agent=settings.sec_user_agent,
+                user_agent=settings.reddit_user_agent,
+                client_id=settings.reddit_client_id,
+                client_secret=settings.reddit_client_secret,
             ),
             settings.enable_reddit,
         ),

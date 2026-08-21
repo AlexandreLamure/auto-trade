@@ -59,6 +59,16 @@ class Settings(BaseSettings):
         "auto-trade/1.0 (contact@example.com)",
         description="User-Agent for SEC EDGAR API requests (required by SEC)",
     )
+    reddit_client_id: str = Field(
+        "", description="Reddit script-app client ID (oauth.reddit.com)"
+    )
+    reddit_client_secret: str = Field(
+        "", description="Reddit script-app client secret"
+    )
+    reddit_user_agent: str = Field(
+        "python:auto-trade:1.0 (local news agent)",
+        description="Reddit API User-Agent (required on every request)",
+    )
     google_trends_spike_threshold: float = Field(
         1.5, description="Emit Google Trends signal when index exceeds this × trailing avg"
     )
