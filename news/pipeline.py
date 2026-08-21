@@ -30,6 +30,8 @@ async def run_cycle(settings: Settings) -> dict[str, int]:
         base_url=settings.ollama_base_url,
         model=settings.ollama_model,
         enable_thinking=False,
+        num_ctx=settings.ollama_num_ctx,
+        temperature=settings.ollama_temperature,
     )
 
     watchlist, held, candidates = await resolve_watchlist(settings)

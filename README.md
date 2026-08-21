@@ -173,7 +173,9 @@ auto-trade/
 | `ALPACA_SECRET_KEY` | – | Alpaca secret key |
 | `ALPACA_PAPER_TRADE` | `true` | Use paper trading endpoint |
 | `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama OpenAI-compatible endpoint |
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Model name |
+| `OLLAMA_MODEL` | `qwen3:14b` | Model name (14B Q4 fits 16GB VRAM) |
+| `OLLAMA_NUM_CTX` | `16384` | Context window — raise above Ollama’s 4096 default |
+| `OLLAMA_TEMPERATURE` | `0.4` | Sampling temperature (below Ollama’s usual ~0.8 default) |
 | `EVENT_STORE_PATH` | `data/events.db` | Shared SQLite event store |
 | `NEWSAPI_KEY` | – | NewsAPI.org key (optional) |
 | `FINNHUB_API_KEY` | – | Finnhub key (optional) |

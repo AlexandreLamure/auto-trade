@@ -26,7 +26,17 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(
         "http://localhost:11434/v1", description="Ollama OpenAI-compatible base URL"
     )
-    ollama_model: str = Field("qwen2.5:7b", description="Ollama model name")
+    ollama_model: str = Field(
+        "qwen3:14b",
+        description="Ollama model name",
+    )
+    ollama_num_ctx: int = Field(
+        16384,
+        description="Ollama context window (num_ctx)",
+    )
+    ollama_temperature: float = Field(
+        0.4, description="Sampling temperature (below Ollama's usual 0.8 default)"
+    )
 
     # Event store (shared by news service and trading agent)
     event_store_path: str = Field("data/events.db", description="SQLite event store path")

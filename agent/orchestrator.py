@@ -44,6 +44,8 @@ class AgentOrchestrator:
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             enable_thinking=settings.enable_thinking,
+            num_ctx=settings.ollama_num_ctx,
+            temperature=settings.ollama_temperature,
         )
         _validate_settings(settings)
 

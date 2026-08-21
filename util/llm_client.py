@@ -21,9 +21,19 @@ class LLMResponse:
 class OllamaClient:
     """Async LLM client backed by a local Ollama instance."""
 
-    def __init__(self, base_url: str, model: str, enable_thinking: bool = False) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        enable_thinking: bool = False,
+        num_ctx: int = 16384,
+        temperature: float = 0.4,
+    ) -> None:
         self._model = model
         self._enable_thinking = enable_thinking
+        self._num_ctx = num_ctx
+        self._temperature = temperature
         self._client = AsyncOpenAI(
             base_url=base_url,
             api_key="ollama",
@@ -31,10 +41,20 @@ class OllamaClient:
 
     async def chat(self, messages: list[dict[str, Any]]) -> LLMResponse:
         """Send a chat request and return a structured LLMResponse."""
+        # Ollama reads context size from options.num_ctx (default is often 4096).
+        # Without this, long research briefs are truncated and JSON schemas are lost.
+        extra_body: dict[str, Any] = {
+            "think": self._enable_thinking,
+            "options": {
+                "num_ctx": self._num_ctx,
+                "temperature": self._temperature,
+            },
+        }
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "extra_body": {"think": self._enable_thinking},
+            "temperature": self._temperature,
+            "extra_body": extra_body,
         }
 
         completion: ChatCompletion = await self._client.chat.completions.create(**kwargs)
