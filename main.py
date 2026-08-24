@@ -6,6 +6,7 @@ By default the process does nothing. Pick exactly one mode:
     python main.py --trade-once    # one trade cycle, then exit
     python main.py --once          # news then trade (sequential), then exit
     python main.py --loop          # news then trade every day at 12:00 America/New_York
+    python main.py --clean         # delete event store and log files, then exit
 """
 
 from __future__ import annotations
@@ -65,6 +66,32 @@ def _seconds_until_next_loop(last_run_date: date | None = None) -> tuple[float, 
     return max(0.0, (target - now).total_seconds()), target
 
 
+def _clean() -> None:
+    root = Path(__file__).resolve().parent
+    store = Path(settings.event_store_path)
+    if not store.is_absolute():
+        store = root / store
+    removed: list[Path] = []
+    for path in (store, Path(f"{store}-wal"), Path(f"{store}-shm"), Path(f"{store}-journal")):
+        if path.is_file():
+            path.unlink()
+            removed.append(path)
+    if LOGS_DIR.is_dir():
+        for path in LOGS_DIR.glob("*.log"):
+            if path.is_file():
+                path.unlink()
+                removed.append(path)
+    if not removed:
+        print("Nothing to clean.")
+        return
+    print("Removed:")
+    for path in removed:
+        try:
+            print(f"  {path.relative_to(root)}")
+        except ValueError:
+            print(f"  {path}")
+
+
 def _log_wait(logs: list[CycleLog], target: datetime, delay: float) -> None:
     hours = delay / 3600.0
     msg = f"Next cycle at {target.strftime('%Y-%m-%d %H:%M %Z')} (in {hours:.1f}h)"
@@ -99,7 +126,16 @@ def main() -> None:
         action="store_true",
         help="Run news then trade every day at 12:00 America/New_York",
     )
+    mode.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete the event store and log files, then exit",
+    )
     args = parser.parse_args()
+
+    if args.clean:
+        _clean()
+        return
 
     if not (args.news_once or args.trade_once or args.once or args.loop):
         parser.print_help()

@@ -16,7 +16,7 @@ session is closed (weekdays 09:30–16:00 ET).
 ## Architecture
 
 ```
-main.py  (--news-once | --trade-once | --once | --loop)
+main.py  (--news-once | --trade-once | --once | --loop | --clean)
   ├── news/pipeline.py
   │    ├── news/collector.py       (APIs + RSS feeds)
   │    ├── news/analyzer.py        (dedupe, group, LLM enrich)
@@ -104,12 +104,15 @@ With no flags, `python main.py` prints help and exits. Pick one mode:
 python main.py --news-once     # one news cycle, then exit
 python main.py --trade-once    # one trade cycle, then exit
 python main.py --once          # news, then trade, then exit
-python main.py --loop          # news then trade every day at 12:00 America/New_York
+python main.py --loop          # news then trade, every day at 12:00 America/New_York
+python main.py --clean         # delete data/events.db and logs/*.log, then exit
 ```
 
 `--once` and `--loop` always run news then trading sequentially (the next step
 starts when the previous one finishes). If the US cash session is closed when a
 cycle starts, that cycle logs `SKIP – market closed` and returns immediately.
+
+`--clean` deletes the event store (`data/events.db` and SQLite sidecars) and `*.log` files in `logs/`.
 
 ---
 
