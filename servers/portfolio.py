@@ -302,27 +302,6 @@ def extract_mover_symbols(
     return merged
 
 
-def merge_symbol_universe(
-    held: list[str],
-    movers: list[str],
-    *,
-    max_candidates: int,
-) -> tuple[list[str], list[str]]:
-    """Return (held_symbols, candidate_symbols) deduplicated."""
-    held_unique = list(dict.fromkeys(s.upper() for s in held))
-    candidates: list[str] = []
-    seen = set(held_unique)
-    for symbol in movers:
-        sym = symbol.upper()
-        if sym in seen:
-            continue
-        seen.add(sym)
-        candidates.append(sym)
-        if len(candidates) >= max_candidates:
-            break
-    return held_unique, candidates
-
-
 async def call_mcp_tool(
     manager: MCPManager,
     name: str,

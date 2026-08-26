@@ -47,42 +47,6 @@ def stop_distance(
     return max(atr_stop, pct_stop, price * 0.02)
 
 
-def inject_bearish_sells(
-    orders: list[TradeOrder],
-    holdings: list[Position],
-    events: list,
-    *,
-    min_importance: int,
-) -> list[TradeOrder]:
-    """Add sells for held names with high-importance bearish events."""
-    held_qty = {pos.symbol: pos.qty for pos in holdings}
-    already = {(o.symbol, o.side) for o in orders}
-    extra: list[TradeOrder] = []
-    seen: set[str] = set()
-    for event in events:
-        if (getattr(event, "sentiment", "") or "").lower() != "bearish":
-            continue
-        if getattr(event, "importance", 0) < min_importance:
-            continue
-        for ticker in getattr(event, "tickers", []) or []:
-            symbol = str(ticker).upper()
-            if symbol in seen or symbol not in held_qty:
-                continue
-            if (symbol, "sell") in already:
-                continue
-            seen.add(symbol)
-            extra.append(
-                TradeOrder(
-                    symbol=symbol,
-                    side="sell",
-                    quantity=held_qty[symbol],
-                    rationale="high-importance bearish event on a held name",
-                    confidence=0.8,
-                )
-            )
-    return extra + orders
-
-
 def _order_rank(order: TradeOrder, prices: dict[str, float]) -> float:
     notional = order.quantity * (prices.get(order.symbol, 0.0) or 1.0)
     return order.confidence * notional if order.confidence else notional

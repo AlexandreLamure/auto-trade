@@ -1,4 +1,5 @@
 """Equity ticker sanitization for Alpaca calls and the event store."""
+# TODO: We could fetch the tradeable symbols from Alpaca directly. It would be slow, so we should fetch once per cycle.
 
 from __future__ import annotations
 

@@ -74,7 +74,6 @@ def tally_proposals(proposals: list[PersonaProposal]) -> dict[str, SymbolTally]:
                 continue
             row.hold_votes += 1
 
-    _ = n_traders
     return tallies
 
 
