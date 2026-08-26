@@ -172,43 +172,6 @@ def apply_consensus_gate(
     )
 
 
-def size_orders_to_dollars(
-    decision: PortfolioDecision,
-    brief: ResearchBrief,
-    settings: Settings,
-) -> PortfolioDecision:
-    """Replace fantasy share counts with qty from cash / max-name notional / last price."""
-    if not decision.orders:
-        return decision
-    equity = brief.portfolio_equity if brief.portfolio_equity > 0 else brief.cash_available
-    max_notional = equity * settings.max_position_pct
-    cash = brief.cash_available
-    sized: list[TradeOrder] = []
-    for order in decision.orders:
-        qty = order.quantity
-        price = brief.latest_prices.get(order.symbol.upper(), 0.0)
-        if order.side == "buy" and price > 0 and max_notional > 0:
-            cap_qty = min(cash, max_notional) / price if price else 0.0
-            if cap_qty <= 0:
-                continue
-            if qty * price > max_notional * 1.25 or qty > cap_qty:
-                qty = cap_qty
-        sized.append(
-            TradeOrder(
-                symbol=order.symbol,
-                side=order.side,
-                quantity=qty,
-                rationale=order.rationale,
-                confidence=order.confidence,
-            )
-        )
-    return PortfolioDecision(
-        orders=sized,
-        consensus_summary=decision.consensus_summary,
-        dissent=decision.dissent,
-    )
-
-
 def has_disagreement(proposals: list[PersonaProposal]) -> bool:
     """True when traders disagree on side for any symbol, or mix HOLD with trades."""
     tallies = tally_proposals(proposals)

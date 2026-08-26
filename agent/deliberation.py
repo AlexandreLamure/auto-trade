@@ -34,7 +34,6 @@ from agent.consensus import (
     apply_consensus_gate,
     format_vote_tally,
     has_disagreement,
-    size_orders_to_dollars,
     tally_proposals,
 )
 from agent.research import ResearchBrief
@@ -288,4 +287,4 @@ async def run_committee(
         )
 
     gated = apply_consensus_gate(decision, final_proposals, brief, settings)
-    return size_orders_to_dollars(gated, brief, settings), final_proposals
+    return gated, final_proposals
