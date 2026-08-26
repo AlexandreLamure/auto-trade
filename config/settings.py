@@ -139,13 +139,7 @@ class Settings(BaseSettings):
     risk_per_name_pct: float = Field(
         0.005, description="Equity fraction risked per name (vol-aware size)"
     )
-    time_stop_days: int = Field(
-        30, description="Sell held losers at or past this many days (0 disables)"
-    )
     enable_stops: bool = Field(True, description="Attach a stop after each buy fill")
-    bearish_min_importance: int = Field(
-        4, description="Bearish events at or above this importance block new buys / force held sells"
-    )
     max_new_names_per_cycle: int = Field(
         1, description="Max new (not already held) names to buy per cycle"
     )

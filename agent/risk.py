@@ -52,38 +52,6 @@ def _order_rank(order: TradeOrder, prices: dict[str, float]) -> float:
     return order.confidence * notional if order.confidence else notional
 
 
-def inject_time_stops(
-    orders: list[TradeOrder],
-    holdings: list[Position],
-    *,
-    time_stop_days: int,
-) -> list[TradeOrder]:
-    """Add full sells for held losers at or past the horizon."""
-    if time_stop_days <= 0:
-        return orders
-    already = {(o.symbol, o.side) for o in orders}
-    extra: list[TradeOrder] = []
-    for pos in holdings:
-        if pos.days_held is None or pos.days_held < time_stop_days:
-            continue
-        plpc = pos.unrealized_plpc
-        if abs(plpc) > 2:
-            plpc = plpc / 100.0
-        if plpc >= 0:
-            continue
-        if (pos.symbol, "sell") in already:
-            continue
-        extra.append(
-            TradeOrder(
-                symbol=pos.symbol,
-                side="sell",
-                quantity=pos.qty,
-                rationale=f"time-stop: held {pos.days_held}d with {plpc:.1%} PnL",
-            )
-        )
-    return extra + orders
-
-
 def parse_held_quantities(positions_json: str) -> dict[str, float]:
     return {pos.symbol: pos.qty for pos in parse_positions(positions_json)}
 

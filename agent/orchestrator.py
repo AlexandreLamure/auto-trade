@@ -29,7 +29,6 @@ from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import (
     build_validation_context,
-    inject_time_stops,
     stop_distance,
     validate_orders,
 )
@@ -114,11 +113,6 @@ class AgentOrchestrator:
             portfolio_equity=brief.portfolio_equity,
             price_stats=brief.price_stats,
             earnings_flags=brief.earnings_flags,
-        )
-        gated_orders = inject_time_stops(
-            portfolio_decision.orders,
-            brief.holdings,
-            time_stop_days=self._settings.time_stop_days,
         )
         approved, rejections = validate_orders(gated_orders, ctx)
         if rejections:
