@@ -17,7 +17,14 @@ from datetime import datetime, timezone
 from config.settings import Settings
 from servers.manager import MCPManager
 from agent.decision import PortfolioDecision, TradeOrder, order_to_dict, proposal_to_dict
-from agent.workflow import format_mcp_summary, format_order_qty, parse_fractionable, parse_nbbo
+from agent.workflow import (
+    ExecutionRecord,
+    format_mcp_summary,
+    format_order_qty,
+    parse_fractionable,
+    parse_nbbo,
+    parse_order_status,
+)
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
 from agent.risk import (
@@ -32,7 +39,6 @@ from store.journal import record_cycle, update_marks
 from util.cycle_log import CycleLog, get_trading_log
 from util.llm_client import OllamaClient
 from util.session import is_market_open, market_closed_message
-from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +133,7 @@ class AgentOrchestrator:
             for note in rejections:
                 log.line(f"Risk: {note}")
 
-        fills: list[tuple[TradeOrder, str]] = []
+        fills: list[ExecutionRecord] = []
         log.section("Execution")
         if approved:
             fills = await self._execute_portfolio(manager, approved, log, brief)
@@ -148,7 +154,18 @@ class AgentOrchestrator:
                 proposed=[order_to_dict(o) for o in gated_orders],
                 approved_keys={(o.symbol, o.side) for o in approved},
                 rejections=rejections,
-                fill_status={(o.symbol, o.side): status for o, status in fills},
+                fill_status={(rec.symbol, rec.side): rec.status for rec in fills},
+                fill_records=[
+                    {
+                        "symbol": rec.symbol,
+                        "side": rec.side,
+                        "qty": rec.submitted_qty,
+                        "status": rec.status,
+                        "limit_price": rec.limit_price,
+                        "reason": rec.reason,
+                    }
+                    for rec in fills
+                ],
                 prices=brief.latest_prices,
             )
         except Exception as exc:  # noqa: BLE001
@@ -160,8 +177,8 @@ class AgentOrchestrator:
         orders: list[TradeOrder],
         log: CycleLog,
         brief: ResearchBrief,
-    ) -> list[tuple[TradeOrder, str]]:
-        fills: list[tuple[TradeOrder, str]] = []
+    ) -> list[ExecutionRecord]:
+        fills: list[ExecutionRecord] = []
         for order in orders:
             try:
                 quote_text = ""
@@ -174,26 +191,51 @@ class AgentOrchestrator:
                     logger.warning("Quote fetch failed for %s: %s", order.symbol, exc)
                 bid, ask = parse_nbbo(quote_text, order.symbol)
                 last = brief.latest_prices.get(order.symbol, 0.0)
-                if order.side == "buy":
-                    limit_px = ask if ask > 0 else last
-                else:
-                    limit_px = bid if bid > 0 else last
-                use_limit = limit_px > 0
+                log.line(
+                    f"  Quote {order.symbol}: bid={bid or '—'} ask={ask or '—'} last={last or '—'}"
+                )
+
+                use_limit = bid > 0 and ask > 0
+                limit_px = 0.0
                 if use_limit:
-                    limit_px = round(limit_px, 2)
+                    if order.side == "buy":
+                        limit_px = round(ask * 1.001, 2)
+                    else:
+                        limit_px = round(bid * 0.999, 2)
+                    if limit_px <= 0:
+                        use_limit = False
 
                 fractionable = False
                 try:
                     asset_result = await manager.call_tool(
                         "get_asset", {"symbol": order.symbol}
                     )
-                    fractionable = parse_fractionable(
-                        manager.result_to_text(asset_result)
-                    )
+                    asset_text = manager.result_to_text(asset_result)
+                    fractionable = parse_fractionable(asset_text)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Asset lookup failed for %s: %s", order.symbol, exc)
+                log.line(f"  Asset {order.symbol}: fractionable={fractionable}")
 
                 qty_str = format_order_qty(order.quantity, fractionable=fractionable)
+                if qty_str is None:
+                    reason = (
+                        f"{order.side.upper()} {order.symbol}: skipped, "
+                        f"qty {order.quantity:g} < 1 and not fractionable "
+                        "(will not round up past the risk cap)"
+                    )
+                    log.line(reason)
+                    fills.append(
+                        ExecutionRecord(
+                            symbol=order.symbol,
+                            side=order.side,
+                            submitted_qty=0.0,
+                            status="skipped",
+                            reason=reason,
+                        )
+                    )
+                    continue
+
+                submitted_qty = float(qty_str)
                 payload: dict[str, str] = {
                     "symbol": order.symbol,
                     "side": order.side,
@@ -226,17 +268,30 @@ class AgentOrchestrator:
                     payload,
                     result_text,
                 )
-                status = "failed" if failed else "submitted"
-                fills.append((order, status))
+                status = "failed" if failed else parse_order_status(result_text)
+                fills.append(
+                    ExecutionRecord(
+                        symbol=order.symbol,
+                        side=order.side,
+                        submitted_qty=submitted_qty,
+                        status=status,
+                        limit_price=limit_px if use_limit else None,
+                    )
+                )
                 log.line(
                     f"{order.side.upper()} {order.symbol} x{qty_str} → {status}"
                 )
                 log.line(f"  {summary}")
-                if use_limit and last > 0:
-                    slip = (limit_px / last - 1.0) * 100.0
-                    log.line(
-                        f"  Slippage vs last close: limit ${limit_px:.2f} vs ${last:.2f} ({slip:+.2f}%)"
-                    )
+                if use_limit:
+                    ref = last if last > 0 else (ask or bid)
+                    if ref > 0:
+                        slip = (limit_px / ref - 1.0) * 100.0
+                        log.line(
+                            f"  Limit ${limit_px:.2f} vs last ${last:.2f} "
+                            f"NBBO {bid:.2f}/{ask:.2f} ({slip:+.2f}%)"
+                        )
+                else:
+                    log.line("  Market order (no usable NBBO; last-close limit skipped)")
                 if failed:
                     logger.warning(
                         "Order not filled for %s %s: %s",
@@ -249,7 +304,15 @@ class AgentOrchestrator:
                 log.line(
                     f"{order.side.upper()} {order.symbol} x{order.quantity:g} → error"
                 )
-                fills.append((order, "error"))
+                fills.append(
+                    ExecutionRecord(
+                        symbol=order.symbol,
+                        side=order.side,
+                        submitted_qty=0.0,
+                        status="error",
+                        reason=str(exc),
+                    )
+                )
         return fills
 
 
@@ -274,6 +337,8 @@ def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:
         )
     if brief.candidate_symbols:
         log.line(f"Candidates: {', '.join(brief.candidate_symbols)}")
+    else:
+        log.line("Candidates: (none)")
 
 
 def _log_mcp_calls(brief: ResearchBrief, log: CycleLog) -> None:
@@ -302,15 +367,14 @@ def _log_market_events(brief: ResearchBrief, settings: Settings, log: CycleLog) 
 
 def _event_one_liner(event: MarketEvent) -> str:
     tickers = ", ".join(event.tickers) if event.tickers else "macro"
-    summary = truncate_text(event.summary, 100)
-    return f"[{tickers}] {summary} (importance {event.importance}/5)"
+    return f"[{tickers}] {event.summary} (importance {event.importance}/5)"
 
 
 def _log_decision(decision: PortfolioDecision, log: CycleLog) -> None:
     log.section("Decision")
     if decision.is_trade():
         for order in decision.orders:
-            log.line(f"Decision: {order.side.upper()} {order.symbol} x{order.quantity:.0f}")
+            log.line(f"Decision: {order.side.upper()} {order.symbol} x{order.quantity:g}")
     else:
         log.line("Decision: HOLD")
     if decision.consensus_summary:

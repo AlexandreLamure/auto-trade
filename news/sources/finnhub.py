@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from news.models import Signal
 from news.sources.base import extract_tickers, parse_published
 from news.sources.http_helpers import api_item_to_signal, valid_api_key
+from util.symbols import is_tradeable_equity_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,9 @@ async def fetch_finnhub(
                 known=watchlist,
             )
             if related and isinstance(related, str):
-                for sym in related.split(","):
-                    s = sym.strip().upper()
-                    if s and s not in tickers:
+                for raw in related.split(","):
+                    s = raw.strip().upper()
+                    if s and is_tradeable_equity_symbol(s) and s not in tickers:
                         tickers.append(s)
 
             signal = api_item_to_signal(
@@ -72,12 +73,14 @@ async def fetch_finnhub(
 
         for sym in watchlist[:5]:
             try:
+                end = datetime.now(timezone.utc).date()
+                start = end - timedelta(days=7)
                 resp = await client.get(
                     "https://finnhub.io/api/v1/company-news",
                     params={
                         "symbol": sym,
-                        "from": "2020-01-01",
-                        "to": "2099-12-31",
+                        "from": start.isoformat(),
+                        "to": end.isoformat(),
                         "token": api_key,
                     },
                 )
@@ -88,14 +91,26 @@ async def fetch_finnhub(
                 continue
 
             for item in items[:5]:
+                title = item.get("headline") or ""
+                snippet = item.get("summary") or ""
+                extracted = extract_tickers(
+                    f"{title} {snippet}", known=watchlist
+                )
+                hints = extracted
+                if sym.upper() in {t.upper() for t in extracted} or (
+                    title and sym.upper() in title.upper().split()
+                ):
+                    hints = list(dict.fromkeys([sym.upper(), *extracted]))
+                elif sym.upper() not in title.upper() and sym.upper() not in snippet.upper():
+                    hints = extracted
                 signal = api_item_to_signal(
                     url=item.get("url") or "",
-                    title=item.get("headline") or "",
-                    snippet=item.get("summary") or "",
+                    title=title,
+                    snippet=snippet,
                     published=_parse_finnhub_time(item.get("datetime")),
                     source_label=f"api:finnhub:{sym}",
                     watchlist=watchlist,
-                    tickers_hint=[sym.upper()],
+                    tickers_hint=hints,
                 )
                 if signal:
                     articles.append(signal)

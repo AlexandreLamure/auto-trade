@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from servers.manager import MCPManager
+from util.symbols import is_tradeable_equity_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class Position:
     cost_basis: float = 0.0
     change_today: float = 0.0
     days_held: int | None = None
+    name: str = ""
 
 
 @dataclass
@@ -36,17 +38,42 @@ class PositionsAndMovers:
 
 def parse_mcp_json(text: str) -> Any:
     try:
-        return json.loads(text)
+        raw = json.loads(text)
     except json.JSONDecodeError:
         return None
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    return raw
 
 
-def unwrap_alpaca_payload(raw: Any) -> Any:
-    """Unwrap Alpaca MCP responses: {\"_alpaca_mcp_security\": ..., \"data\": ...}."""
+def unwrap_alpaca_payload(raw: Any, *, _depth: int = 0) -> Any:
+    """Unwrap Alpaca MCP responses (security wrapper, nested data, JSON strings)."""
+    if _depth > 5:
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return raw
+            return unwrap_alpaca_payload(parsed, _depth=_depth + 1)
+        return raw
     if not isinstance(raw, dict):
         return raw
-    if "data" in raw:
-        return raw["data"]
+    for key in ("data", "result", "output"):
+        inner = raw.get(key)
+        if inner is None:
+            continue
+        if isinstance(inner, (dict, list, str)):
+            return unwrap_alpaca_payload(inner, _depth=_depth + 1)
+    if "_alpaca_mcp_security" in raw:
+        rest = {k: v for k, v in raw.items() if k != "_alpaca_mcp_security"}
+        if rest:
+            return unwrap_alpaca_payload(rest, _depth=_depth + 1)
     return raw
 
 
@@ -160,8 +187,8 @@ def format_holdings_table(
     if not positions:
         return "_No open positions._"
     lines = [
-        "| Symbol | Qty | Avg cost | Last | Unrealized | Weight | Days held |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Symbol | Name | Qty | Avg cost | Last | Unrealized | Weight | Days held |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for pos in positions:
         weight = (pos.market_value / equity * 100.0) if equity > 0 else 0.0
@@ -170,8 +197,9 @@ def format_holdings_table(
         if abs(pos.unrealized_plpc) > 2:
             pl_pct = pos.unrealized_plpc
         days = "—" if pos.days_held is None else str(pos.days_held)
+        name = pos.name or "—"
         lines.append(
-            f"| {pos.symbol} | {pos.qty:g} | ${pos.avg_entry_price:.2f} | "
+            f"| {pos.symbol} | {name} | {pos.qty:g} | ${pos.avg_entry_price:.2f} | "
             f"${pos.current_price:.2f} | {pl_pct:+.1f}% (${pos.unrealized_pl:,.0f}) | "
             f"{weight:.1f}% | {days} |"
         )
@@ -206,9 +234,11 @@ def _rank_mover_side(items: Any, *, min_price: float, limit: int) -> list[str]:
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol", "")).upper().strip()
-        if not symbol:
+        if not is_tradeable_equity_symbol(symbol):
             continue
         price = parse_float_field(item.get("price") or item.get("p"))
+        if 0 < price < min_price:
+            continue
         pct = abs(
             parse_float_field(
                 item.get("percent_change")
@@ -216,12 +246,7 @@ def _rank_mover_side(items: Any, *, min_price: float, limit: int) -> list[str]:
                 or item.get("percent")
             )
         )
-        penalty = 0.0
-        if symbol.endswith("W"):
-            penalty += 1000.0
-        if 0 < price < min_price:
-            penalty += 500.0
-        ranked.append((penalty - pct, symbol))
+        ranked.append((-pct, symbol))
     ranked.sort(key=lambda pair: pair[0])
     symbols: list[str] = []
     seen: set[str] = set()

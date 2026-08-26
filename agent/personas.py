@@ -23,39 +23,42 @@ class Persona:
 PROPOSAL_JSON_SCHEMA = """\
 ```json
 {
-  "stance": "BUY|SELL|HOLD|TRIM|ADD",
+  "stance": "BUY",
   "orders": [
-    {"symbol": "AAPL", "side": "buy", "qty": 25, "rationale": "short reason"}
+    {"symbol": "AAPL", "side": "buy", "qty": 1.5, "rationale": "short reason"}
   ],
   "confidence": 0.72,
   "key_points": ["point one", "point two"]
 }
-```"""
+```
+stance must be exactly one of BUY, SELL, HOLD, TRIM, ADD. qty is shares, computed from the price table."""
 
 DEBATE_JSON_SCHEMA = """\
 ```json
 {
-  "stance": "BUY|SELL|HOLD|TRIM|ADD",
+  "stance": "SELL",
   "orders": [
-    {"symbol": "AAPL", "side": "sell", "qty": 50, "rationale": "revised view"}
+    {"symbol": "AAPL", "side": "sell", "qty": 20, "rationale": "revised view"}
   ],
   "confidence": 0.65,
   "key_points": ["agree/disagree summary"],
   "commentary": "2-4 sentences responding to other traders"
 }
-```"""
+```
+stance must be exactly one of BUY, SELL, HOLD, TRIM, ADD. qty is shares from the price table."""
 
 CHAIR_JSON_SCHEMA = """\
 ```json
 {
   "orders": [
-    {"symbol": "AAPL", "side": "buy", "qty": 25, "rationale": "committee rationale"},
+    {"symbol": "AAPL", "side": "buy", "qty": 1.25, "rationale": "committee rationale"},
     {"symbol": "TSLA", "side": "sell", "qty": 15, "rationale": "trim loser"}
   ],
   "consensus_summary": "3-5 sentences on the final portfolio action",
   "dissent": "optional minority view or null"
 }
-```"""
+```
+qty is shares = min(cash, max per name) / last price. Do not invent share counts."""
 
 
 def _base_objective(horizon_days: int, max_position_pct: float, max_orders: int) -> str:
@@ -67,9 +70,10 @@ Only US equities. You may propose up to {max_orders} orders.
 ## Trading posture
 - Cash is an option, not a failure. HOLD is a valid output when edge is unclear.
 - Trade only when you have a thesis (catalyst, mispricing, or a position that is wrong).
-- Size from conviction: high-confidence names may use up to **{max_position_pct:.0%} of portfolio equity**.
-  Do not spray token 1–5 share probes, and do not fill the order budget for its own sake.
+- Size from conviction using the price table: qty = min(available cash, {max_position_pct:.0%} of equity) / last price.
+  Do not invent share counts. Do not spray token probes. Skip a buy if 1 share exceeds the name cap.
 - Sells should be decisive when a holding is wrong or capital is better used elsewhere.
+- Use the Identity section for held names (ticker is the listed equity, not a similarly named crypto token).
 
 ## Output format
 Respond with ONLY a fenced JSON block matching the schema given in the user message.
@@ -157,7 +161,7 @@ You synthesise trader debate into a final consensus portfolio action.
 
 ## Your role
 - Synthesise debate into executable trades **or an explicit HOLD**.
-- When 2+ traders agree on direction for a symbol with a real thesis, execute with meaningful size.
+- When 2+ traders agree on direction for a symbol with a real thesis, execute with size from dollars / last price (not the median of guessed share counts).
 - Do not invent orders the traders did not support.
 - Preserve minority dissent in the dissent field when views diverge.
 - HOLD (empty orders) when agreement, confidence, or catalysts are missing.""",

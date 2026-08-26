@@ -32,6 +32,7 @@ def record_cycle(
     rejections: list[str],
     fill_status: dict[tuple[str, str], str],
     prices: dict[str, float],
+    fill_records: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write one trading cycle's proposals, orders, and decision prices."""
     now = utcnow()
@@ -71,26 +72,44 @@ def record_cycle(
                     json.dumps(proposal.get("orders") or []),
                 ),
             )
+        executed: dict[tuple[str, str], dict[str, Any]] = {}
+        for rec in fill_records or []:
+            symbol = str(rec.get("symbol", "")).upper()
+            side = str(rec.get("side", "")).lower()
+            if symbol and side:
+                executed[(symbol, side)] = rec
         for order in proposed:
             symbol = str(order.get("symbol", "")).upper()
             side = str(order.get("side", "")).lower()
             key = (symbol, side)
-            if key in fill_status:
+            rec = executed.get(key)
+            if rec is not None:
+                status = str(rec.get("status") or fill_status.get(key) or "submitted")
+                reason = str(rec.get("reason") or "")
+                qty = float(rec.get("qty") or order.get("qty") or order.get("quantity") or 0)
+                limit_price = rec.get("limit_price")
+            elif key in fill_status:
                 status = fill_status[key]
                 reason = ""
+                qty = float(order.get("qty") or order.get("quantity") or 0)
+                limit_price = None
             elif key in approved_keys:
                 status = "approved"
                 reason = ""
+                qty = float(order.get("qty") or order.get("quantity") or 0)
+                limit_price = None
             else:
                 status = "rejected"
                 reason = next((r for r in rejections if symbol in r), "")
+                qty = float(order.get("qty") or order.get("quantity") or 0)
+                limit_price = None
             price = prices.get(symbol)
-            qty = float(order.get("qty") or order.get("quantity") or 0)
             conn.execute(
                 """
                 INSERT INTO cycle_orders (
-                    id, cycle_id, symbol, side, qty, rationale, status, reason, decision_price
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, cycle_id, symbol, side, qty, rationale, status, reason,
+                    decision_price, limit_price
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid.uuid4().hex,
@@ -102,6 +121,7 @@ def record_cycle(
                     status,
                     reason,
                     price,
+                    float(limit_price) if limit_price not in (None, "") else None,
                 ),
             )
             conn.execute(

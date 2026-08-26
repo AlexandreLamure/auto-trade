@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -13,7 +14,18 @@ from servers.portfolio import (
     parse_mcp_json,
     unwrap_alpaca_payload,
 )
+from util.symbols import is_tradeable_equity_symbol, sanitize_symbol_list
 from util.text import truncate_text
+
+
+@dataclass
+class ExecutionRecord:
+    symbol: str
+    side: str
+    submitted_qty: float
+    status: str
+    limit_price: float | None = None
+    reason: str = ""
 
 
 @dataclass
@@ -113,19 +125,57 @@ def parse_nbbo(quote_json: str, symbol: str) -> tuple[float, float]:
     if raw is None:
         return 0.0, 0.0
     payload = unwrap_alpaca_payload(raw)
-    quote: dict[str, Any] | None = None
-    if isinstance(payload, dict):
-        nested = payload.get("quote") or payload.get("quotes") or payload
-        if isinstance(nested, dict) and symbol.upper() in nested:
-            maybe = nested.get(symbol.upper())
-            quote = maybe if isinstance(maybe, dict) else None
-        elif isinstance(nested, dict):
-            quote = nested
-    if not isinstance(quote, dict):
+    bid, ask = _extract_bid_ask(payload, symbol.upper())
+    if bid > 0 or ask > 0:
+        return bid, ask
+    return _extract_bid_ask(payload, "")
+
+
+def _extract_bid_ask(obj: Any, symbol: str, *, depth: int = 0) -> tuple[float, float]:
+    if depth > 6 or obj is None:
         return 0.0, 0.0
-    bid = parse_float_field(quote.get("bp") or quote.get("bid_price") or quote.get("bid"))
-    ask = parse_float_field(quote.get("ap") or quote.get("ask_price") or quote.get("ask"))
-    return bid, ask
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return 0.0, 0.0
+        return _extract_bid_ask(obj, symbol, depth=depth + 1)
+    if isinstance(obj, list):
+        for item in obj:
+            bid, ask = _extract_bid_ask(item, symbol, depth=depth + 1)
+            if bid > 0 or ask > 0:
+                return bid, ask
+        return 0.0, 0.0
+    if not isinstance(obj, dict):
+        return 0.0, 0.0
+    if symbol:
+        nested = obj.get(symbol) or obj.get(symbol.lower())
+        if nested is not None:
+            bid, ask = _extract_bid_ask(nested, "", depth=depth + 1)
+            if bid > 0 or ask > 0:
+                return bid, ask
+    bid = parse_float_field(
+        obj.get("bp")
+        or obj.get("bid_price")
+        or obj.get("bid")
+        or obj.get("BidPrice")
+        or obj.get("bidPrice")
+    )
+    ask = parse_float_field(
+        obj.get("ap")
+        or obj.get("ask_price")
+        or obj.get("ask")
+        or obj.get("AskPrice")
+        or obj.get("askPrice")
+    )
+    if bid > 0 or ask > 0:
+        return bid, ask
+    for key in ("quote", "quotes", "latest_quote", "latestQuote"):
+        if key in obj:
+            bid, ask = _extract_bid_ask(obj[key], symbol, depth=depth + 1)
+            if bid > 0 or ask > 0:
+                return bid, ask
+    return 0.0, 0.0
 
 
 def parse_fractionable(asset_json: str) -> bool:
@@ -135,20 +185,87 @@ def parse_fractionable(asset_json: str) -> bool:
     if raw is None:
         return False
     payload = unwrap_alpaca_payload(raw)
-    if not isinstance(payload, dict):
-        return False
-    flag = payload.get("fractionable")
+    flag = _find_key(payload, "fractionable")
     if isinstance(flag, bool):
         return flag
+    if flag is None:
+        return False
     return str(flag).lower() in {"true", "1", "yes"}
 
 
-def format_order_qty(qty: float, *, fractionable: bool) -> str:
+def parse_asset_name(asset_json: str) -> str:
+    if asset_json.startswith("ERROR"):
+        return ""
+    raw = parse_mcp_json(asset_json)
+    if raw is None:
+        return ""
+    payload = unwrap_alpaca_payload(raw)
+    name = _find_key(payload, "name") or _find_key(payload, "official_name")
+    return str(name).strip() if name else ""
+
+
+def parse_order_status(order_json: str) -> str:
+    """Best-effort Alpaca order status from place_stock_order JSON."""
+    if order_json.startswith("ERROR"):
+        return "failed"
+    raw = parse_mcp_json(order_json)
+    if raw is None:
+        return "submitted"
+    payload = unwrap_alpaca_payload(raw)
+    status = _find_key(payload, "status")
+    if not status:
+        return "submitted"
+    normalized = str(status).lower().strip()
+    if normalized in {"filled", "partially_filled"}:
+        return "filled" if normalized == "filled" else "submitted"
+    if normalized in {"rejected", "canceled", "cancelled", "expired"}:
+        return normalized.replace("cancelled", "canceled")
+    if normalized in {"accepted", "new", "pending_new", "held", "done_for_day"}:
+        return "submitted"
+    return "submitted"
+
+
+def _find_key(obj: Any, key: str, *, depth: int = 0) -> Any:
+    if depth > 6 or obj is None:
+        return None
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return _find_key(obj, key, depth=depth + 1)
+    if isinstance(obj, list):
+        for item in obj:
+            found = _find_key(item, key, depth=depth + 1)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if key in obj:
+        return obj[key]
+    for value in obj.values():
+        if isinstance(value, (dict, list, str)):
+            found = _find_key(value, key, depth=depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def format_order_qty(qty: float, *, fractionable: bool) -> str | None:
+    """Format a risk-approved qty for Alpaca. Never rounds up past *qty*."""
+    if qty <= 0:
+        return None
     if not fractionable:
-        return str(max(1, int(qty)))
+        whole = int(qty)
+        if whole < 1:
+            return None
+        return str(whole)
     if abs(qty - round(qty)) < 1e-8:
-        return str(int(round(qty)))
-    return f"{qty:.6f}".rstrip("0").rstrip(".")
+        whole = int(round(qty))
+        return str(whole) if whole >= 1 else None
+    formatted = f"{qty:.6f}".rstrip("0").rstrip(".")
+    return formatted if formatted and float(formatted) > 0 else None
 
 
 def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
@@ -167,6 +284,16 @@ def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
         if isinstance(bars, list):
             result[str(symbol).upper()] = [b for b in bars if isinstance(b, dict)]
     return result
+
+
+def merge_bars_json(parts: list[str]) -> str:
+    """Combine multiple get_stock_bars responses into one bars payload."""
+    merged: dict[str, list[dict[str, Any]]] = {}
+    for text in parts:
+        if not text or text.startswith("ERROR"):
+            continue
+        merged.update(_parse_bars_by_symbol(text))
+    return json.dumps({"bars": merged})
 
 
 def compute_price_stats(
@@ -273,10 +400,10 @@ def expand_symbol_universe(
 ) -> tuple[list[str], list[str]]:
     """Merge held, movers, and event-discovered tickers into a research universe.
 
-    Event tickers get reserved slots so a full gainer list cannot crowd them out.
-    Remaining capacity is filled from leftover movers, then leftover events.
+    Event tickers get reserved slots first so micro-cap movers cannot crowd them out.
+    Remaining capacity is filled from leftover events, then leftover movers.
     """
-    held_unique = list(dict.fromkeys(s.upper() for s in held if s))
+    held_unique = sanitize_symbol_list(held)
     mover_cap = mover_slots if mover_slots is not None else max_candidates
     event_cap = event_slots if event_slots is not None else max_candidates
     seen = set(held_unique)
@@ -287,17 +414,19 @@ def expand_symbol_universe(
         for symbol in source:
             if added >= limit or len(candidates) >= max_candidates:
                 return
+            if not is_tradeable_equity_symbol(symbol):
+                continue
             sym = symbol.upper().strip()
-            if not sym or sym in seen or sym.endswith("W"):
+            if sym in seen:
                 continue
             seen.add(sym)
             candidates.append(sym)
             added += 1
 
-    _take(movers, mover_cap)
     _take(event_tickers, event_cap)
-    _take(movers, max_candidates)
+    _take(movers, mover_cap)
     _take(event_tickers, max_candidates)
+    _take(movers, max_candidates)
     return held_unique, candidates
 
 
@@ -312,9 +441,9 @@ def filter_liquid_candidates(
     bars_by_symbol = _parse_bars_by_symbol(bars_json)
     kept: list[str] = []
     for symbol in candidates:
-        sym = symbol.upper()
-        if sym.endswith("W"):
+        if not is_tradeable_equity_symbol(symbol):
             continue
+        sym = symbol.upper()
         bars = bars_by_symbol.get(sym) or []
         if not bars:
             continue

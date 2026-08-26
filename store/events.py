@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from store.db import connect, get_connection
+from util.symbols import is_tradeable_equity_symbol
 from util.time import parse_iso, to_iso, utcnow
 
 _DEFAULT_WEIGHT = 0.5
@@ -32,6 +33,8 @@ def _normalize_tickers(tickers: list[str] | None) -> list[str]:
     for ticker in tickers or []:
         sym = str(ticker).upper().strip()
         if not sym or sym in seen:
+            continue
+        if not is_tradeable_equity_symbol(sym):
             continue
         seen.add(sym)
         out.append(sym)
@@ -323,6 +326,7 @@ def _query_events(
     limit: int,
     tickers: set[str] | None = None,
     order_by_importance: bool = False,
+    macro_only: bool = False,
 ) -> list[MarketEvent]:
     cutoff = to_iso(utcnow() - timedelta(hours=since_hours))
     order_clause = (
@@ -331,6 +335,12 @@ def _query_events(
         else "e.last_seen_at DESC"
     )
     has_articles = "AND EXISTS (SELECT 1 FROM articles a WHERE a.event_id = e.id)"
+    macro_clause = ""
+    if macro_only:
+        macro_clause = (
+            "AND (LOWER(e.event_type) = 'macro' "
+            "OR e.tickers = '[]' OR e.tickers = '')"
+        )
 
     if tickers:
         placeholders = ",".join("?" for _ in tickers)
@@ -342,6 +352,7 @@ def _query_events(
               AND e.importance >= ?
               AND UPPER(TRIM(je.value)) IN ({placeholders})
               {has_articles}
+              {macro_clause}
             ORDER BY e.importance DESC, e.last_seen_at DESC
             LIMIT ?
         """
@@ -356,6 +367,7 @@ def _query_events(
             WHERE e.last_seen_at >= ?
               AND e.importance >= ?
               {has_articles}
+              {macro_clause}
             ORDER BY {order_clause}
             LIMIT ?
             """,
@@ -372,7 +384,7 @@ def find_candidate_events(
     since_hours: int = 48,
 ) -> list[MarketEvent]:
     if not tickers:
-        return _query_events(db_path, since_hours=since_hours, min_importance=1, limit=50)
+        return []
 
     return _query_events(
         db_path,
@@ -390,6 +402,7 @@ def query_events(
     since_hours: int = 72,
     min_importance: int = 1,
     limit: int = 30,
+    macro_only: bool = False,
 ) -> list[MarketEvent]:
     symbol_set = {s.upper() for s in (symbols or [])} or None
     return _query_events(
@@ -397,8 +410,9 @@ def query_events(
         since_hours=since_hours,
         min_importance=min_importance,
         limit=limit,
-        tickers=symbol_set,
+        tickers=None if macro_only else symbol_set,
         order_by_importance=True,
+        macro_only=macro_only,
     )
 
 
@@ -441,7 +455,7 @@ def discover_event_tickers(
     seen = set(exclude)
     for row in rows:
         sym = str(row["ticker"]).upper()
-        if sym in seen:
+        if not is_tradeable_equity_symbol(sym) or sym in seen:
             continue
         seen.add(sym)
         discovered.append(sym)

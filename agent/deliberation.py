@@ -30,11 +30,16 @@ from agent.personas import (
     build_chair_persona,
     build_trader_personas,
 )
-from agent.consensus import apply_consensus_gate, format_vote_tally, has_disagreement, tally_proposals
+from agent.consensus import (
+    apply_consensus_gate,
+    format_vote_tally,
+    has_disagreement,
+    size_orders_to_dollars,
+    tally_proposals,
+)
 from agent.research import ResearchBrief
 from util.cycle_log import CycleLog
 from util.llm_client import OllamaClient
-from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +57,24 @@ class DeliberationTurn:
 def _sizing_hint(brief: ResearchBrief, max_position_pct: float) -> str:
     equity = brief.portfolio_equity if brief.portfolio_equity > 0 else brief.cash_available
     max_dollars = equity * max_position_pct
-    return (
+    lines = [
         f"Equity: ${equity:,.2f} | Cash: ${brief.cash_available:,.2f} | "
         f"Max per name: ${max_dollars:,.2f} ({max_position_pct:.0%} of equity). "
-        "HOLD is valid. Size from conviction, not to fill the cap."
-    )
+        "HOLD is valid. qty = min(cash, max per name) / last price. "
+        "Skip buys where 1 share exceeds the name cap."
+    ]
+    priced = []
+    for symbol in brief.all_symbols:
+        px = brief.latest_prices.get(symbol)
+        if not px:
+            continue
+        max_shares = max_dollars / px if px else 0.0
+        priced.append(f"{symbol} ${px:.2f} → max {max_shares:.4g} shares")
+    if priced:
+        lines.append("Price table (use these last prices; do not guess): " + "; ".join(priced[:20]))
+    else:
+        lines.append("Price table is empty — HOLD rather than guessing share counts.")
+    return " ".join(lines)
 
 
 def _build_round1_user_prompt(
@@ -109,7 +127,7 @@ def _build_chair_user_prompt(
     tally_text = format_vote_tally(tallies)
     point_lines = []
     for proposal in proposals:
-        points = "; ".join(proposal.key_points[:3]) if proposal.key_points else proposal.commentary[:240]
+        points = "; ".join(proposal.key_points[:3]) if proposal.key_points else proposal.commentary
         point_lines.append(
             f"- {proposal.persona} ({proposal.stance}, conf {proposal.confidence:.2f}): {points}"
         )
@@ -124,9 +142,12 @@ Rules:
 - Execute a symbol only when 2+ traders agree on direction with a real thesis.
 - Up to {max_orders} orders. HOLD (empty list) when agreement or catalysts are missing.
 - Net conflicting orders on the same symbol.
-- Size buys up to ~{max_position_pct:.0%} of equity per name ({_sizing_hint(brief, max_position_pct)}).
-- Use median qty from the agreeing side unless cash/equity caps require less.
+- Size buys as shares = min(cash, ~{max_position_pct:.0%} of equity) / last price from the price table.
+- Do not use median guessed qty when it implies a notional above the name cap.
 - consensus_summary must explain the {HORIZON_DAYS}-day PnL strategy, including why cash is held if it is.
+
+## Sizing
+{_sizing_hint(brief, max_position_pct)}
 
 ## Research brief
 {brief.to_prompt_context()}
@@ -153,18 +174,18 @@ async def _call_persona(
     response = await llm.chat(messages)
     content = response.content or ""
 
-    if cycle_log is not None:
-        cycle_log.line(f"[{persona.name} · Round {round_num}]")
-        if response.thinking:
-            cycle_log.line(truncate_text(response.thinking, 2000))
-        cycle_log.line(truncate_text(content, 4000))
-        cycle_log.line("")
-
     proposal = None
     if persona.id != "chair":
         proposal = parse_persona_proposal(
             content, persona=persona.id, extra_text=response.thinking
         )
+
+    if cycle_log is not None:
+        cycle_log.line(f"[{persona.name} · Round {round_num}]")
+        if response.thinking:
+            cycle_log.line(response.thinking)
+        cycle_log.line(content)
+        cycle_log.line("")
 
     return DeliberationTurn(
         persona=persona.id,
@@ -266,4 +287,5 @@ async def run_committee(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    return apply_consensus_gate(decision, final_proposals, brief, settings), final_proposals
+    gated = apply_consensus_gate(decision, final_proposals, brief, settings)
+    return size_orders_to_dollars(gated, brief, settings), final_proposals

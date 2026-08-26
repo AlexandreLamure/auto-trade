@@ -36,6 +36,8 @@ from agent.workflow import (
     compute_price_stats,
     expand_symbol_universe,
     filter_liquid_candidates,
+    merge_bars_json,
+    parse_asset_name,
     parse_latest_prices,
 )
 from store import (
@@ -46,6 +48,7 @@ from store import (
     init_db,
     query_events,
 )
+from util.symbols import sanitize_symbol_list
 from util.text import truncate_text
 
 logger = logging.getLogger(__name__)
@@ -95,9 +98,7 @@ class ResearchBrief:
         if self.price_analytics_markdown.strip():
             lines.extend(["## Price analytics", "", self.price_analytics_markdown, ""])
         if self.events_markdown.strip():
-            lines.extend(
-                ["## Market events", "", truncate_text(self.events_markdown, 4000), ""]
-            )
+            lines.extend(["## Market events", "", self.events_markdown, ""])
         return "\n".join(lines)
 
 
@@ -141,19 +142,18 @@ def _format_event(event: MarketEvent, articles: list[StoredArticle]) -> str:
     companies = ", ".join(event.companies) if event.companies else "—"
     updated = event.last_seen_at.strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"### {event.summary[:120]}{'…' if len(event.summary) > 120 else ''}",
+        f"### {event.summary}",
         f"- Type: {event.event_type} | Sentiment: {event.sentiment} | "
         f"Importance: {event.importance}/5 | Confidence: {event.confidence:.0%}",
         f"- Tickers: {tickers} | Companies: {companies}",
         f"- Articles: {event.article_count} | Last updated: {updated}",
-        f"- Summary: {truncate_text(event.summary, 800)}",
+        f"- Summary: {event.summary}",
     ]
     if articles:
         lines.append("- Sources:")
         for article in articles[:2]:
             lines.append(
-                f"  - [{article.source}, w={article.weight:.2f}] "
-                f"{truncate_text(article.title, 100)}"
+                f"  - [{article.source}, w={article.weight:.2f}] {article.title}"
             )
     return "\n".join(lines)
 
@@ -185,13 +185,16 @@ def load_market_events(
         min_importance=settings.events_min_importance,
         limit=settings.events_limit,
     )
+    symbol_events = [
+        e for e in symbol_events if (e.event_type or "").lower() != "macro"
+    ]
 
     macro_events = query_events(
         db_path,
-        symbols=[],
         since_hours=settings.events_since_hours,
         min_importance=settings.macro_events_min_importance,
         limit=settings.macro_events_limit,
+        macro_only=True,
     )
 
     seen_ids = {e.id for e in symbol_events}
@@ -218,6 +221,55 @@ def load_market_events(
     body = "\n".join(lines)
     all_events = symbol_events + macro_only
     return body, all_events
+
+
+async def _fetch_stock_bars(
+    manager: MCPManager,
+    symbols: list[str],
+    tool_call_log: list[dict[str, Any]],
+) -> str:
+    """Fetch daily bars in held/candidate chunks so one bad ticker cannot wipe prices."""
+    valid = sanitize_symbol_list(symbols)
+    if not valid:
+        return ""
+    chunk_size = 8
+    parts: list[str] = []
+    for i in range(0, len(valid), chunk_size):
+        chunk = valid[i : i + chunk_size]
+        text = await call_mcp_tool(
+            manager,
+            "get_stock_bars",
+            {
+                "symbols": ",".join(chunk),
+                "timeframe": "1Day",
+                "days": HORIZON_DAYS,
+                "feed": "iex",
+            },
+            tool_call_log=tool_call_log,
+        )
+        parts.append(text)
+    if len(parts) == 1:
+        return parts[0]
+    return merge_bars_json(parts)
+
+
+async def _load_asset_names(
+    manager: MCPManager,
+    symbols: list[str],
+    tool_call_log: list[dict[str, Any]],
+) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for symbol in sanitize_symbol_list(symbols):
+        text = await call_mcp_tool(
+            manager,
+            "get_asset",
+            {"symbol": symbol},
+            tool_call_log=tool_call_log,
+        )
+        name = parse_asset_name(text)
+        if name:
+            names[symbol] = name
+    return names
 
 
 def earnings_flags_from_events(
@@ -322,10 +374,15 @@ def _build_summary(
         "movers": "Market movers",
         "market_events": "Market events",
     }
+    mcp_json_sections = frozenset(
+        {"account", "portfolio_history", "orders", "movers"}
+    )
     for key, title in section_titles.items():
         body = sections.get(key, "").strip()
         if body:
-            lines.extend([f"## {title}", "", truncate_text(body, 4000), ""])
+            if key in mcp_json_sections:
+                body = truncate_text(body, 4000)
+            lines.extend([f"## {title}", "", body, ""])
 
     return "\n".join(lines)
 
@@ -391,17 +448,7 @@ async def run_deep_research(
 
     bars = ""
     if all_symbols:
-        bars = await call_mcp_tool(
-            manager,
-            "get_stock_bars",
-            {
-                "symbols": ",".join(all_symbols),
-                "timeframe": "1Day",
-                "days": HORIZON_DAYS,
-                "feed": "iex",
-            },
-            tool_call_log=log,
-        )
+        bars = await _fetch_stock_bars(manager, all_symbols, log)
         latest_prices = parse_latest_prices(bars)
         if bars:
             candidates = filter_liquid_candidates(
@@ -411,6 +458,14 @@ async def run_deep_research(
                 min_adv_shares=settings.min_adv_shares,
             )
             all_symbols = list(dict.fromkeys(held + candidates))
+
+    for pos in holdings:
+        if pos.current_price > 0:
+            latest_prices.setdefault(pos.symbol, pos.current_price)
+
+    asset_names = await _load_asset_names(manager, held, log)
+    for pos in holdings:
+        pos.name = asset_names.get(pos.symbol, pos.name)
 
     events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
@@ -447,7 +502,27 @@ async def run_deep_research(
         if pos.market_value <= 0 and pos.current_price and pos.qty:
             pos.market_value = pos.current_price * abs(pos.qty)
     holdings_markdown = format_holdings_table(holdings, equity=equity)
+    if asset_names:
+        ident = "\n".join(
+            f"- **{sym}**: {name} (US listed equity)"
+            for sym, name in asset_names.items()
+        )
+        holdings_markdown = f"{holdings_markdown}\n\n### Identity\n{ident}"
     sections["holdings"] = holdings_markdown
+
+    if not (price_analytics_markdown or "").strip() or "No price analytics" in (
+        price_analytics_markdown or ""
+    ):
+        fallback_rows = [
+            f"| {sym} | ${latest_prices[sym]:.2f} |"
+            for sym in all_symbols
+            if latest_prices.get(sym)
+        ]
+        if fallback_rows:
+            price_analytics_markdown = "\n".join(
+                ["| Symbol | Price |", "| --- | ---: |", *fallback_rows]
+            )
+            sections["price_analytics"] = price_analytics_markdown
 
     summary = _build_summary(
         held=held,
@@ -487,31 +562,19 @@ async def enrich_brief_prices(
     settings: Settings,
 ) -> ResearchBrief:
     """Fetch bar data for symbols missing from the research universe (chair verify)."""
-    missing = list(
-        dict.fromkeys(s.upper() for s in symbols if s.upper() not in brief.latest_prices)
+    missing = sanitize_symbol_list(
+        [s.upper() for s in symbols if s.upper() not in brief.latest_prices]
     )
     if not missing:
         return brief
 
-    bars = await call_mcp_tool(
-        manager,
-        "get_stock_bars",
-        {
-            "symbols": ",".join(missing),
-            "timeframe": "1Day",
-            "days": HORIZON_DAYS,
-            "feed": "iex",
-        },
-        tool_call_log=brief.tool_call_log,
-    )
+    bars = await _fetch_stock_bars(manager, missing, brief.tool_call_log)
     new_prices = parse_latest_prices(bars)
     extra_stats = compute_price_stats(bars)
     extra_analytics = compute_price_analytics(bars, earnings=brief.earnings_flags)
 
     updated_prices = {**brief.latest_prices, **new_prices}
     updated_stats = {**brief.price_stats, **extra_stats}
-
-    updated_prices = {**brief.latest_prices, **new_prices}
     combined_analytics = brief.price_analytics_markdown
     if extra_analytics and "No price analytics" not in extra_analytics:
         combined_analytics = (

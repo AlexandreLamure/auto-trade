@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS cycle_orders (
     rationale TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
-    decision_price REAL
+    decision_price REAL,
+    limit_price REAL
 );
 
 CREATE TABLE IF NOT EXISTS cycle_marks (
@@ -96,6 +97,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE articles ADD COLUMN weight REAL NOT NULL DEFAULT 0.5"
         )
     conn.execute("DROP TABLE IF EXISTS event_tickers")
+    order_cols = {row[1] for row in conn.execute("PRAGMA table_info(cycle_orders)").fetchall()}
+    if "limit_price" not in order_cols:
+        conn.execute("ALTER TABLE cycle_orders ADD COLUMN limit_price REAL")
 
 
 def init_schema(conn: sqlite3.Connection) -> None:

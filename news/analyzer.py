@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from config.settings import Settings
@@ -23,25 +24,42 @@ from store import (
     find_unenriched_events,
     get_event_articles,
     insert_article,
-    touch_event_seen,
     update_event,
 )
 from util.cycle_log import CycleLog
 from util.json_parse import extract_json_block
 from util.llm_client import OllamaClient
-from util.text import truncate_text
+from util.symbols import is_tradeable_equity_symbol
 from util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-EVENT_MATCH_THRESHOLD = 0.4
+EVENT_MATCH_THRESHOLD = 0.6
 MAX_ENRICHMENTS_PER_CYCLE = 200
+
+_JUNK_TITLE = re.compile(
+    r"cd rates|high-yield savings|heloc|home equity loan|"
+    r"credit card|obituar|soft retirement|visa review|"
+    r"refinance rates today|best cd |mortgage and refinance|"
+    r"cash back on every purchase",
+    re.I,
+)
+_MACRO_SOURCES = (
+    "rss:fed_press",
+    "rss:treasury",
+    "rss:investing_macro",
+    "rss:fda_press",
+)
 
 ENRICH_SYSTEM_PROMPT = """\
 You are a financial market analyst. Given multiple signals about the same market event,
 produce a concise structured summary for traders. Signals come from sources with varying
 reliability (SEC filings and IR press releases are most authoritative; social media
 and search trends are least).
+
+Assign tickers only if the company or ticker is explicitly in the signals.
+Never copy a ticker from a feed name. Never use FOREX:, CRYPTO:, futures, indexes,
+or made-up labels (AI-RELATED, SPACEX). Leave tickers empty for pure macro items.
 
 Respond with ONLY a fenced JSON block:
 ```json
@@ -103,7 +121,7 @@ def _parse_enrichment(text: str) -> EnrichedEvent | None:
         sentiment=str(data.get("sentiment") or "neutral").strip(),
         importance=importance,
         confidence=confidence,
-        tickers=[str(t).upper() for t in tickers if t],
+        tickers=[str(t).upper() for t in tickers if t and is_tradeable_equity_symbol(str(t))],
         companies=[str(c) for c in companies if c],
     )
 
@@ -111,15 +129,23 @@ def _parse_enrichment(text: str) -> EnrichedEvent | None:
 def _match_event(
     signal: Signal,
     candidates: list,
+    signal_tickers: list[str],
 ) -> str | None:
+    sig_set = {t.upper() for t in signal_tickers if t}
     norm = normalize_title(signal.title)
     for event in candidates:
-        if title_similarity(signal.title, event.summary) >= EVENT_MATCH_THRESHOLD:
-            return event.id
-        if title_similarity(signal.title, event.summary[:120]) >= EVENT_MATCH_THRESHOLD:
-            return event.id
+        if title_similarity(signal.title, event.summary) < EVENT_MATCH_THRESHOLD:
+            if title_similarity(signal.title, event.summary[:120]) < EVENT_MATCH_THRESHOLD:
+                continue
+        event_tickers = {t.upper() for t in (event.tickers or []) if t}
+        if sig_set and event_tickers and not (sig_set & event_tickers):
+            continue
+        return event.id
     for event in candidates:
         if normalize_title(event.summary[:80]) == norm[:80]:
+            event_tickers = {t.upper() for t in (event.tickers or []) if t}
+            if sig_set and event_tickers and not (sig_set & event_tickers):
+                continue
             return event.id
     return None
 
@@ -127,11 +153,18 @@ def _match_event(
 def _signal_tickers(signal: Signal, watchlist: list[str]) -> list[str]:
     hints = list(signal.tickers_hint)
     extracted = extract_tickers(f"{signal.title} {signal.snippet}", known=watchlist)
-    return list(dict.fromkeys(hints + extracted))
+    return [
+        t
+        for t in dict.fromkeys(hints + extracted)
+        if is_tradeable_equity_symbol(t)
+    ]
 
 
 def _should_ingest_signal(signal: Signal, watchlist: list[str]) -> bool:
     """Drop noisy low-signal sources that lack watchlist ticker relevance."""
+    if _JUNK_TITLE.search(signal.title or ""):
+        return False
+
     watchset = {s.upper() for s in watchlist}
     tickers = _signal_tickers(signal, watchlist)
 
@@ -144,6 +177,9 @@ def _should_ingest_signal(signal: Signal, watchlist: list[str]) -> bool:
             return False
         if any(t.endswith("W") for t in tickers):
             return False
+
+    if not tickers:
+        return signal.source.startswith(_MACRO_SOURCES)
 
     return True
 
@@ -182,14 +218,14 @@ def _log_event_enrichment(
     """Write LLM enrichment details to the news cycle log."""
     log.line(f"Event {event_id[:8]} ({len(event_signals)} article(s)):")
     for sig in event_signals:
-        log.line(f"  • [{sig.source}] {truncate_text(sig.title, 120)}")
+        log.line(f"  • [{sig.source}] {sig.title}")
     if parsed_ok:
         log.line(
             f"  LLM → type={enriched.event_type} sentiment={enriched.sentiment} "
             f"importance={importance} confidence={confidence:.2f} "
             f"tickers={', '.join(enriched.tickers) or '—'}"
         )
-        log.line(f"  Summary: {truncate_text(enriched.summary, 300)}")
+        log.line(f"  Summary: {enriched.summary}")
     else:
         logger.warning(
             "LLM unparseable JSON for event %s; headline fallback → "
@@ -211,7 +247,7 @@ async def _enrich_event(
         lines.append(f"Signal {i}:")
         lines.append(f"  Title: {sig.title}")
         lines.append(f"  Source: {sig.source} (weight: {sig.weight:.2f})")
-        lines.append(f"  Snippet: {sig.snippet[:300]}")
+        lines.append(f"  Snippet: {sig.snippet}")
         lines.append("")
 
     user_prompt = "Analyze these related signals:\n\n" + "\n".join(lines)
@@ -313,7 +349,7 @@ async def process_signals(
         log.section("Enrichment")
 
     events_to_enrich: dict[str, list[Signal]] = {}
-    enrichment_logged = False
+    pending_new: list[tuple[Signal, list[str], str]] = []
 
     for signal in signals:
         if not _should_ingest_signal(signal, watchlist):
@@ -323,23 +359,16 @@ async def process_signals(
         h = url_hash(signal.url)
         existing_event_id = find_article_event_id(db_path, h)
         if existing_event_id is not None:
-            touch_event_seen(db_path, existing_event_id, seen_at=utcnow())
             stats["skipped"] += 1
             continue
 
         tickers = _signal_tickers(signal, watchlist)
         candidates = find_candidate_events(db_path, tickers, since_hours=48)
-
-        event_id = _match_event(signal, candidates)
+        event_id = _match_event(signal, candidates, tickers)
 
         if event_id is None:
-            event_id = create_event(
-                db_path,
-                summary=signal.title,
-                tickers=tickers,
-                first_seen_at=signal.published_at or utcnow(),
-                last_seen_at=utcnow(),
-            )
+            pending_new.append((signal, tickers, h))
+            continue
 
         insert_article(
             db_path,
@@ -354,10 +383,43 @@ async def process_signals(
         )
         stats["new"] += 1
         log.line(
-            f"New → event {event_id[:8]} [{signal.source}] "
-            f"{truncate_text(signal.title, 120)}"
+            f"New → event {event_id[:8]} [{signal.source}] {signal.title}"
         )
+        stored = get_event_articles(db_path, event_id)
+        events_to_enrich[event_id] = _signals_from_articles(stored)
 
+    pending_new.sort(
+        key=lambda item: _enrichment_priority([item[0]], watchlist),
+        reverse=True,
+    )
+    remaining_slots = max(0, MAX_ENRICHMENTS_PER_CYCLE - len(events_to_enrich))
+    for signal, tickers, h in pending_new:
+        if remaining_slots <= 0:
+            stats["skipped"] += 1
+            continue
+        event_id = create_event(
+            db_path,
+            summary=signal.title,
+            tickers=tickers,
+            first_seen_at=signal.published_at or utcnow(),
+            last_seen_at=utcnow(),
+        )
+        insert_article(
+            db_path,
+            url=signal.url,
+            url_hash=h,
+            title=signal.title,
+            source=signal.source,
+            snippet=signal.snippet,
+            event_id=event_id,
+            published_at=signal.published_at,
+            weight=signal.weight,
+        )
+        stats["new"] += 1
+        remaining_slots -= 1
+        log.line(
+            f"New → event {event_id[:8]} [{signal.source}] {signal.title}"
+        )
         stored = get_event_articles(db_path, event_id)
         events_to_enrich[event_id] = _signals_from_articles(stored)
 
@@ -369,12 +431,10 @@ async def process_signals(
     )
     for event_id, event_signals in enrich_queue:
         if enriched_count >= MAX_ENRICHMENTS_PER_CYCLE:
-            if not enrichment_logged:
-                log.line(
-                    f"Enrichment cap reached ({MAX_ENRICHMENTS_PER_CYCLE}); "
-                    "remaining events keep stub summaries"
-                )
-                enrichment_logged = True
+            log.line(
+                f"Enrichment cap reached ({MAX_ENRICHMENTS_PER_CYCLE}); "
+                "remaining queued events were not created as stubs"
+            )
             break
         await _persist_enrichment(llm, db_path, event_id, event_signals, log, stats)
         enriched_count += 1

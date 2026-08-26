@@ -168,20 +168,8 @@ def validate_orders(
     buys = [o for o in netted if o.side != "sell"]
     buys.sort(key=lambda o: _order_rank(o, ctx.latest_prices), reverse=True)
 
-    held = set(ctx.held_quantities)
-    ranked: list[TradeOrder] = list(sells)
-    new_names = 0
-    for buy in buys:
-        is_new = buy.symbol not in held
-        if is_new and new_names >= ctx.max_new_names:
-            rejections.append(
-                f"BUY {buy.symbol}: skipped, max {ctx.max_new_names} new name(s) this cycle"
-            )
-            continue
-        ranked.append(buy)
-        if is_new:
-            new_names += 1
-    netted = ranked
+    held_symbols = set(ctx.held_quantities)
+    netted = list(sells) + buys
 
     if len(netted) > ctx.max_orders:
         rejections.append(
@@ -202,12 +190,13 @@ def validate_orders(
         )
     sell_reserved: dict[str, float] = {}
     sold_notional: dict[str, float] = {}
+    new_names = 0
 
     for order in netted:
         if order.side == "sell":
-            held = ctx.held_quantities.get(order.symbol, 0.0)
+            held_qty = ctx.held_quantities.get(order.symbol, 0.0)
             already = sell_reserved.get(order.symbol, 0.0)
-            allowed = max(0.0, held - already)
+            allowed = max(0.0, held_qty - already)
             if allowed <= 0:
                 rejections.append(f"SELL {order.symbol}: no position to sell")
                 continue
@@ -215,7 +204,6 @@ def validate_orders(
             sell_reserved[order.symbol] = already + qty
             price = ctx.latest_prices.get(order.symbol) or 0.0
             proceeds = qty * price if price > 0 else 0.0
-            cash_remaining += proceeds
             sold_notional[order.symbol] = sold_notional.get(order.symbol, 0.0) + proceeds
             approved.append(
                 TradeOrder(
@@ -229,6 +217,12 @@ def validate_orders(
 
         if max_name_notional <= 0:
             rejections.append(f"BUY {order.symbol}: max position size is zero")
+            continue
+        is_new = order.symbol not in held_symbols
+        if is_new and new_names >= ctx.max_new_names:
+            rejections.append(
+                f"BUY {order.symbol}: skipped, max {ctx.max_new_names} new name(s) this cycle"
+            )
             continue
         if cash_remaining <= 0:
             rejections.append(f"BUY {order.symbol}: insufficient cash")
@@ -264,7 +258,33 @@ def validate_orders(
         )
         max_shares = math.floor(room / price * 10000) / 10000 if room > 0 else 0.0
         max_affordable = math.floor(cash_remaining / price * 10000) / 10000
-        capped = min(qty, max_shares, max_affordable, vol_shares)
+        cap_shares = min(max_shares, max_affordable)
+        if cap_shares <= 0:
+            rejections.append(
+                f"BUY {order.symbol}: qty below minimum after equity/cash cap "
+                f"(price=${price:.2f}, max ${max_name_notional:.2f} per name)"
+            )
+            continue
+        if price > max_name_notional and price > cash_remaining:
+            rejections.append(
+                f"BUY {order.symbol}: 1 share (${price:.2f}) exceeds equity/cash cap "
+                f"(${max_name_notional:.2f} per name)"
+            )
+            continue
+        if price > max_name_notional or cap_shares < 1:
+            if cap_shares < 1 and price > room:
+                rejections.append(
+                    f"BUY {order.symbol}: 1 share (${price:.2f}) exceeds remaining "
+                    f"name cap ${room:.2f}"
+                )
+                continue
+        capped = min(qty, cap_shares)
+        if vol_shares > 0:
+            if vol_shares >= 1 or cap_shares < 1:
+                capped = min(capped, vol_shares)
+            else:
+                # Small book: do not crush below 1 share when 1 share still fits the cap.
+                capped = min(capped, max(vol_shares, min(1.0, cap_shares)))
         if capped < qty:
             rejections.append(
                 f"BUY {order.symbol}: reduced qty {qty:g} → {capped:g} "
@@ -293,6 +313,8 @@ def validate_orders(
             )
         )
         cash_remaining -= cost
+        if is_new:
+            new_names += 1
 
     return approved, rejections
 

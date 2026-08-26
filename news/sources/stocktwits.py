@@ -98,10 +98,10 @@ async def fetch_stocktwits(
                 signals.append(
                     Signal(
                         url=url,
-                        title=body[:120],
+                        title=body,
                         source=f"stocktwits:{sym}",
                         published_at=published,
-                        snippet=body[:500],
+                        snippet=body,
                         tickers_hint=tickers,
                     )
                 )

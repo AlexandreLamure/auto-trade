@@ -126,7 +126,7 @@ def parse_persona_proposal(text: str, *, persona: str = "", extra_text: str | No
         orders=[],
         confidence=0.0,
         key_points=[],
-        commentary=text[:500] if text else _PARSE_FAILURE_REASON,
+        commentary=text if text else _PARSE_FAILURE_REASON,
     )
 
 
@@ -152,15 +152,15 @@ def _parse_persona_proposal_text(text: str, *, persona: str) -> PersonaProposal:
     clean = _strip_thinking(text)
     raw_json = _extract_json_str(clean, marker_keys=("stance", "orders", "confidence"))
     if raw_json is None:
-        return _hold_fallback(persona, clean[:800])
+        return _hold_fallback(persona, clean)
 
     try:
         data = json.loads(raw_json)
     except json.JSONDecodeError:
-        return _hold_fallback(persona, clean[:800])
+        return _hold_fallback(persona, clean)
 
     if not isinstance(data, dict):
-        return _hold_fallback(persona, clean[:800])
+        return _hold_fallback(persona, clean)
 
     orders = _parse_order_list(data.get("orders") or [])
     key_points_raw = data.get("key_points") or []

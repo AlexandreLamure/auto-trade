@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -44,6 +45,12 @@ FINANCE_KEYWORDS = frozenset(
 )
 
 
+_CRYPTO_MARKET_RE = re.compile(
+    r"\b(depeg|usde|usdc|usdt|stablecoin|bitcoin|ethereum|ethena|crypto)\b",
+    re.I,
+)
+
+
 def _is_finance_related(text: str) -> bool:
     lower = text.lower()
     return any(kw in lower for kw in FINANCE_KEYWORDS)
@@ -55,12 +62,12 @@ def _market_to_signal(market: dict, watchlist: list[str]) -> Signal | None:
     if not slug or not question:
         return None
 
-    description = (market.get("description") or "")[:300]
+    description = (market.get("description") or "").strip()
     outcomes = market.get("outcomePrices") or market.get("outcomes") or ""
     snippet_parts = [description] if description else []
     if outcomes:
         snippet_parts.append(f"Prices: {outcomes}")
-    snippet = " | ".join(snippet_parts)[:500] or question[:500]
+    snippet = " | ".join(snippet_parts) or question
 
     end_date = market.get("endDate") or market.get("endDateIso")
     published = parse_published(end_date) if isinstance(end_date, str) else None
@@ -69,6 +76,8 @@ def _market_to_signal(market: dict, watchlist: list[str]) -> Signal | None:
         published = now
 
     tickers = extract_tickers(f"{question} {snippet}", known=watchlist)
+    if _CRYPTO_MARKET_RE.search(f"{question} {snippet}"):
+        return None
     if not tickers:
         return None
     if watchlist and not any(t in {s.upper() for s in watchlist} for t in tickers):
@@ -147,8 +156,6 @@ async def fetch_polymarket(
                     continue
                 sig = _market_to_signal(market, watchlist)
                 if sig:
-                    if sym.upper() not in sig.tickers_hint:
-                        sig.tickers_hint = list(dict.fromkeys(sig.tickers_hint + [sym.upper()]))
                     seen_slugs.add(slug)
                     signals.append(sig)
 

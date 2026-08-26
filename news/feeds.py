@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from util.symbols import is_tradeable_equity_symbol
+
 
 @dataclass(frozen=True)
 class FeedConfig:
@@ -29,12 +31,12 @@ def ticker_feeds(tickers: list[str]) -> list[FeedConfig]:
     feeds: list[FeedConfig] = []
     for symbol in tickers:
         sym = symbol.strip().upper()
-        if not sym:
+        if not is_tradeable_equity_symbol(sym):
             continue
         feeds.append(
             FeedConfig(
                 url=f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym}&region=US&lang=en-US",
-                label=f"yahoo_{sym}",
+                label="yahoo_ticker",
             )
         )
     return feeds
