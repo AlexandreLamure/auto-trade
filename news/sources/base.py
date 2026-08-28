@@ -86,6 +86,37 @@ def extract_tickers(text: str, *, known: list[str] | None = None) -> list[str]:
     return found
 
 
+# Collapse common finance headline variants so Jaccard matching clusters better.
+_TITLE_SYNONYMS = {
+    "buyback": "repurchase",
+    "buybacks": "repurchase",
+    "repurchases": "repurchase",
+    "repurchasing": "repurchase",
+    "expanding": "expand",
+    "expands": "expand",
+    "expanded": "expand",
+    "increases": "increase",
+    "increased": "increase",
+    "increasing": "increase",
+    "boosts": "boost",
+    "boosted": "boost",
+    "boosting": "boost",
+    "raises": "raise",
+    "raised": "raise",
+    "raising": "raise",
+    "announces": "announce",
+    "announced": "announce",
+    "announcing": "announce",
+    "reports": "report",
+    "reported": "report",
+    "reporting": "report",
+    "earnings": "earning",
+    "dividend": "distribution",
+    "dividends": "distribution",
+    "distributions": "distribution",
+}
+
+
 def normalize_title(title: str) -> str:
     text = title.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -98,16 +129,30 @@ def title_keywords(title: str) -> set[str]:
         "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "at",
         "is", "are", "was", "were", "with", "as", "by", "from", "its", "it",
         "that", "this", "after", "over", "about", "into", "says", "say",
+        "why", "how", "what", "here", "heres", "just", "now", "new",
     }
     words = normalize_title(title).split()
-    return {w for w in words if len(w) > 2 and w not in stop}
+    out: set[str] = set()
+    for w in words:
+        if len(w) <= 2 or w in stop:
+            continue
+        out.add(_TITLE_SYNONYMS.get(w, w))
+    return out
 
 
 def title_similarity(a: str, b: str) -> float:
+    """Headline similarity in [0, 1].
+
+    Uses the max of Jaccard and overlap coefficient so a short headline can
+    still match a longer variant that adds secondary context.
+    """
     ka = title_keywords(a)
     kb = title_keywords(b)
     if not ka or not kb:
         return 0.0
-    intersection = ka & kb
-    union = ka | kb
-    return len(intersection) / len(union)
+    inter = len(ka & kb)
+    if inter == 0:
+        return 0.0
+    jaccard = inter / len(ka | kb)
+    overlap = inter / min(len(ka), len(kb))
+    return max(jaccard, overlap)
