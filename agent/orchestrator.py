@@ -114,6 +114,7 @@ class AgentOrchestrator:
             price_stats=brief.price_stats,
             earnings_flags=brief.earnings_flags,
         )
+        gated_orders = portfolio_decision.orders
         approved, rejections = validate_orders(gated_orders, ctx)
         if rejections:
             logger.warning("Order validation notes: %s", "; ".join(rejections))
