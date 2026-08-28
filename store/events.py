@@ -318,34 +318,6 @@ def get_event_articles(db_path: str, event_id: str) -> list[StoredArticle]:
         return [StoredArticle.from_row(row) for row in rows]
 
 
-def get_article_titles_by_event(
-    db_path: str,
-    event_ids: list[str],
-) -> dict[str, list[str]]:
-    """Batch-load article titles keyed by event id (for clustering matches)."""
-    if not event_ids:
-        return {}
-    unique_ids = list(dict.fromkeys(event_ids))
-    out: dict[str, list[str]] = {eid: [] for eid in unique_ids}
-    placeholders = ",".join("?" for _ in unique_ids)
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            f"""
-            SELECT event_id, title
-            FROM articles
-            WHERE event_id IN ({placeholders})
-            ORDER BY published_at DESC
-            """,
-            unique_ids,
-        ).fetchall()
-    for row in rows:
-        eid = str(row["event_id"])
-        title = str(row["title"] or "").strip()
-        if title:
-            out.setdefault(eid, []).append(title)
-    return out
-
-
 def _query_events(
     db_path: str,
     *,

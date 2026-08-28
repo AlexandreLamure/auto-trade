@@ -1,4 +1,4 @@
-"""Deduplicate signals, group into events, and LLM-enrich."""
+"""Deduplicate signals, LLM-cluster into events, and LLM-enrich."""
 
 from __future__ import annotations
 
@@ -9,19 +9,15 @@ from dataclasses import dataclass
 
 from config.settings import Settings
 from news.models import Signal
-from news.sources.base import (
-    extract_tickers,
-    title_similarity,
-    url_hash,
-)
+from news.sources.base import extract_tickers, url_hash
 from news.weights import apply_weighted_scores
 from store import (
+    MarketEvent,
     StoredArticle,
     create_event,
     find_article_event_id,
     find_candidate_events,
     find_unenriched_events,
-    get_article_titles_by_event,
     get_event_articles,
     insert_article,
     update_event,
@@ -34,119 +30,7 @@ from util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-EVENT_MATCH_THRESHOLD = 0.55
-# Shared tickers make related headlines more likely to be the same story.
-EVENT_MATCH_THRESHOLD_SHARED_TICKER = 0.40
 MAX_ENRICHMENTS_PER_CYCLE = 200
-
-
-def _ticker_sets_compatible(a: set[str], b: set[str]) -> bool:
-    """Allow match when both empty (macro) or they share at least one ticker."""
-    if a and b:
-        return bool(a & b)
-    return not a and not b
-
-
-def _match_threshold(signal_tickers: set[str], event_tickers: set[str]) -> float:
-    if signal_tickers & event_tickers:
-        return EVENT_MATCH_THRESHOLD_SHARED_TICKER
-    return EVENT_MATCH_THRESHOLD
-
-
-def _best_text_similarity(title: str, texts: list[str]) -> float:
-    best = 0.0
-    for text in texts:
-        if not text:
-            continue
-        score = title_similarity(title, text)
-        if score > best:
-            best = score
-    return best
-
-
-def _match_event(
-    signal: Signal,
-    candidates: list,
-    signal_tickers: list[str],
-    article_titles_by_event: dict[str, list[str]] | None = None,
-) -> str | None:
-    """Attach a signal to the best existing event by title + ticker overlap.
-
-    Compares against stored article titles and the event summary (which may be
-    either a stub headline or an LLM rewrite).
-    """
-    sig_set = {t.upper() for t in signal_tickers if t}
-    titles_by_event = article_titles_by_event or {}
-    best_id: str | None = None
-    best_score = 0.0
-
-    for event in candidates:
-        event_tickers = {t.upper() for t in (event.tickers or []) if t}
-        if not _ticker_sets_compatible(sig_set, event_tickers):
-            continue
-
-        texts = list(titles_by_event.get(event.id, []))
-        if event.summary:
-            texts.append(event.summary)
-        score = _best_text_similarity(signal.title, texts)
-        if score < _match_threshold(sig_set, event_tickers):
-            continue
-        if score > best_score:
-            best_score = score
-            best_id = event.id
-
-    return best_id
-
-
-def _cluster_pending(
-    pending: list[tuple[Signal, list[str], str]],
-) -> list[list[tuple[Signal, list[str], str]]]:
-    """Group same-cycle unmatched signals into event clusters (union-find)."""
-    n = len(pending)
-    if n == 0:
-        return []
-    if n == 1:
-        return [pending]
-
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i: int, j: int) -> None:
-        pi, pj = find(i), find(j)
-        if pi != pj:
-            parent[pi] = pj
-
-    ticker_sets = [{t.upper() for t in tickers if t} for _, tickers, _ in pending]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if not _ticker_sets_compatible(ticker_sets[i], ticker_sets[j]):
-                continue
-            score = title_similarity(pending[i][0].title, pending[j][0].title)
-            if score >= _match_threshold(ticker_sets[i], ticker_sets[j]):
-                union(i, j)
-
-    clusters: dict[int, list[tuple[Signal, list[str], str]]] = {}
-    for i, item in enumerate(pending):
-        clusters.setdefault(find(i), []).append(item)
-    return list(clusters.values())
-
-
-def _merged_tickers(cluster: list[tuple[Signal, list[str], str]]) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for _, tickers, _ in cluster:
-        for t in tickers:
-            sym = t.upper()
-            if sym not in seen:
-                seen.add(sym)
-                merged.append(sym)
-    return merged
-
 
 _JUNK_TITLE = re.compile(
     r"cd rates|high-yield savings|heloc|home equity loan|"
@@ -161,6 +45,23 @@ _MACRO_SOURCES = (
     "rss:investing_macro",
     "rss:fda_press",
 )
+
+PAIR_SYSTEM_PROMPT = """\
+You decide whether a news article belongs to an existing market event or is a new story.
+
+Articles about the same corporate action, earnings report, regulatory filing, or macro
+headline should share one event. Different stories for the same ticker stay separate.
+
+Respond with ONLY a fenced JSON block:
+```json
+{
+  "attach_to": "event_id or null",
+  "confidence": 0.85,
+  "reason": "one short sentence"
+}
+```
+
+Use null when this article is a distinct event. Only use an id from the candidate list."""
 
 ENRICH_SYSTEM_PROMPT = """\
 You are a financial market analyst. Given multiple signals about the same market event,
@@ -199,6 +100,13 @@ class EnrichedEvent:
     companies: list[str]
 
 
+@dataclass
+class PairDecision:
+    event_id: str | None
+    confidence: float
+    reason: str
+
+
 def _parse_enrichment(text: str) -> EnrichedEvent | None:
     raw = extract_json_block(text) or text.strip()
     try:
@@ -235,6 +143,48 @@ def _parse_enrichment(text: str) -> EnrichedEvent | None:
         tickers=[str(t).upper() for t in tickers if t and is_tradeable_equity_symbol(str(t))],
         companies=[str(c) for c in companies if c],
     )
+
+
+def _parse_pairing(text: str, valid_ids: set[str]) -> PairDecision | None:
+    raw = extract_json_block(text) or text.strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    attach = data.get("attach_to")
+    event_id: str | None = None
+    if attach is not None and str(attach).strip().lower() not in ("", "null", "none"):
+        candidate_id = str(attach).strip()
+        if candidate_id in valid_ids:
+            event_id = candidate_id
+
+    confidence = data.get("confidence", 0.5)
+    try:
+        confidence = max(0.0, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.5
+
+    reason = str(data.get("reason") or "").strip()
+    return PairDecision(event_id=event_id, confidence=confidence, reason=reason)
+
+
+def _format_candidates(candidates: list[MarketEvent]) -> str:
+    if not candidates:
+        return "(no candidates)"
+    lines: list[str] = []
+    for i, event in enumerate(candidates, 1):
+        tickers = ", ".join(event.tickers) if event.tickers else "—"
+        lines.append(
+            f"Candidate {i}:\n"
+            f"  id: {event.id}\n"
+            f"  tickers: {tickers}\n"
+            f"  articles: {event.article_count}\n"
+            f"  summary: {event.summary}"
+        )
+    return "\n\n".join(lines)
 
 
 def _signal_tickers(signal: Signal, watchlist: list[str]) -> list[str]:
@@ -302,7 +252,6 @@ def _log_event_enrichment(
     importance: int,
     confidence: float,
 ) -> None:
-    """Write LLM enrichment details to the news cycle log."""
     log.line(f"Event {event_id[:8]} ({len(event_signals)} article(s)):")
     for sig in event_signals:
         log.line(f"  • [{sig.source}] {sig.title}")
@@ -323,6 +272,41 @@ def _log_event_enrichment(
             importance,
             confidence,
         )
+
+
+async def _llm_pair_signal(
+    llm: OllamaClient,
+    signal: Signal,
+    tickers: list[str],
+    candidates: list[MarketEvent],
+) -> PairDecision:
+    if not candidates:
+        return PairDecision(event_id=None, confidence=1.0, reason="no candidates")
+
+    valid_ids = {e.id for e in candidates}
+    user_prompt = (
+        "New article:\n"
+        f"  Title: {signal.title}\n"
+        f"  Source: {signal.source}\n"
+        f"  Tickers: {', '.join(tickers) or '—'}\n"
+        f"  Snippet: {signal.snippet}\n\n"
+        "Existing events:\n\n"
+        f"{_format_candidates(candidates)}"
+    )
+
+    response = await llm.chat(
+        [
+            {"role": "system", "content": PAIR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
+    parsed = _parse_pairing(response.content or "", valid_ids)
+    if parsed is not None:
+        return parsed
+
+    logger.warning("LLM unparseable pairing JSON for: %s", signal.title[:80])
+    return PairDecision(event_id=None, confidence=0.0, reason="parse error")
 
 
 async def _enrich_event(
@@ -427,17 +411,13 @@ async def process_signals(
     watchlist: list[str],
     log: CycleLog,
 ) -> dict[str, int]:
-    """Ingest new signals: dedupe, group, enrich, persist. Returns stats."""
+    """Ingest new signals: dedupe, LLM-cluster, enrich, persist."""
     db_path = settings.event_store_path
-
     stats = {"fetched": len(signals), "new": 0, "skipped": 0, "updated_events": 0}
+    events_to_enrich: dict[str, list[Signal]] = {}
 
     if signals:
-        log.section("Enrichment")
-
-    events_to_enrich: dict[str, list[Signal]] = {}
-    pending_new: list[tuple[Signal, list[str], str]] = []
-    article_titles_cache: dict[str, list[str]] = {}
+        log.section("Clustering")
 
     for signal in signals:
         if not _should_ingest_signal(signal, watchlist):
@@ -445,25 +425,40 @@ async def process_signals(
             continue
 
         h = url_hash(signal.url)
-        existing_event_id = find_article_event_id(db_path, h)
-        if existing_event_id is not None:
+        if find_article_event_id(db_path, h) is not None:
             stats["skipped"] += 1
             continue
 
         tickers = _signal_tickers(signal, watchlist)
-        candidates = find_candidate_events(db_path, tickers, since_hours=48)
-        missing_ids = [e.id for e in candidates if e.id not in article_titles_cache]
-        if missing_ids:
-            article_titles_cache.update(
-                get_article_titles_by_event(db_path, missing_ids)
-            )
-        event_id = _match_event(
-            signal, candidates, tickers, article_titles_cache
+        candidates = find_candidate_events(
+            db_path,
+            tickers,
+            since_hours=settings.events_since_hours,
         )
+        decision = await _llm_pair_signal(llm, signal, tickers, candidates)
 
-        if event_id is None:
-            pending_new.append((signal, tickers, h))
-            continue
+        if decision.event_id is None:
+            event_id = create_event(
+                db_path,
+                summary=signal.title,
+                tickers=tickers,
+                first_seen_at=signal.published_at or utcnow(),
+                last_seen_at=utcnow(),
+            )
+            log.line(
+                f"Pair → NEW ({decision.confidence:.2f}) "
+                f"[{signal.source}] {signal.title}"
+            )
+            if decision.reason:
+                log.line(f"  {decision.reason}")
+        else:
+            event_id = decision.event_id
+            log.line(
+                f"Pair → {event_id[:8]} ({decision.confidence:.2f}) "
+                f"[{signal.source}] {signal.title}"
+            )
+            if decision.reason:
+                log.line(f"  {decision.reason}")
 
         insert_article(
             db_path,
@@ -477,67 +472,11 @@ async def process_signals(
             weight=signal.weight,
         )
         stats["new"] += 1
-        article_titles_cache.setdefault(event_id, []).append(signal.title)
-        log.line(
-            f"Attach → event {event_id[:8]} [{signal.source}] {signal.title}"
-        )
         stored = get_event_articles(db_path, event_id)
         events_to_enrich[event_id] = _signals_from_articles(stored)
 
-    clusters = _cluster_pending(pending_new)
-    clusters.sort(
-        key=lambda cluster: _enrichment_priority(
-            [item[0] for item in cluster], watchlist
-        ),
-        reverse=True,
-    )
-    remaining_slots = max(0, MAX_ENRICHMENTS_PER_CYCLE - len(events_to_enrich))
-    for cluster in clusters:
-        if remaining_slots <= 0:
-            stats["skipped"] += len(cluster)
-            continue
-
-        tickers = _merged_tickers(cluster)
-        first_signal = cluster[0][0]
-        first_seen = first_signal.published_at or utcnow()
-        for signal, _, _ in cluster[1:]:
-            pub = signal.published_at
-            if pub is not None and pub < first_seen:
-                first_seen = pub
-
-        event_id = create_event(
-            db_path,
-            summary=first_signal.title,
-            tickers=tickers,
-            first_seen_at=first_seen,
-            last_seen_at=utcnow(),
-        )
-        remaining_slots -= 1
-        titles: list[str] = []
-        for signal, _, h in cluster:
-            insert_article(
-                db_path,
-                url=signal.url,
-                url_hash=h,
-                title=signal.title,
-                source=signal.source,
-                snippet=signal.snippet,
-                event_id=event_id,
-                published_at=signal.published_at,
-                weight=signal.weight,
-            )
-            stats["new"] += 1
-            titles.append(signal.title)
-            log.line(
-                f"New → event {event_id[:8]} [{signal.source}] {signal.title}"
-            )
-        article_titles_cache[event_id] = titles
-        if len(cluster) > 1:
-            log.line(
-                f"  clustered {len(cluster)} articles into event {event_id[:8]}"
-            )
-        stored = get_event_articles(db_path, event_id)
-        events_to_enrich[event_id] = _signals_from_articles(stored)
+    if events_to_enrich:
+        log.section("Enrichment")
 
     enriched_count = 0
     enrich_queue = sorted(
@@ -549,13 +488,12 @@ async def process_signals(
         if enriched_count >= MAX_ENRICHMENTS_PER_CYCLE:
             log.line(
                 f"Enrichment cap reached ({MAX_ENRICHMENTS_PER_CYCLE}); "
-                "remaining queued events were not created as stubs"
+                "remaining events skipped"
             )
             break
         await _persist_enrichment(llm, db_path, event_id, event_signals, log, stats)
         enriched_count += 1
 
-    # Backfill stub events that already have articles but missed enrichment.
     backfill_ids = [
         eid for eid in find_unenriched_events(db_path, limit=50)
         if eid not in events_to_enrich
