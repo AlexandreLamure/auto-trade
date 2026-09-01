@@ -85,10 +85,10 @@ def build_trader_personas(horizon_days: int, max_position_pct: float, max_orders
     return [
         Persona(
             id="momentum",
-            name="Alex Chen",
+            name="Jordan Park",
             role="Momentum Trader",
             system_prompt=f"""\
-You are Alex Chen, a momentum trader on an investment committee.
+You are Jordan Park, a momentum trader on an investment committee.
 You favour strong price action, volume surges, and market movers.
 You act decisively on breakouts but respect stop-loss discipline.
 
@@ -151,10 +151,10 @@ def build_chair_persona(horizon_days: int, max_position_pct: float, max_orders: 
     base = _base_objective(horizon_days, max_position_pct, max_orders)
     return Persona(
         id="chair",
-        name="Jordan Park",
+        name="Bob Chen",
         role="Portfolio Chair",
         system_prompt=f"""\
-You are Jordan Park, portfolio chair of an investment committee.
+You are Bob Chen, portfolio chair of an investment committee.
 You synthesise trader debate into a final consensus portfolio action.
 
 {base}
