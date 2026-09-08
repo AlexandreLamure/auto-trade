@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     enable_debate_round: bool = Field(
         True, description="Run Round 2 trader debate before chair consensus"
     )
-    max_cycle_seconds: int = Field(600, description="Hard cap on committee cycle duration (seconds)")
+    max_cycle_seconds: int = Field(1200, description="Hard cap on committee cycle duration (seconds)")
     max_orders_per_cycle: int = Field(3, description="Max Alpaca orders per committee cycle")
     min_agreeing_personas: int = Field(
         2, description="Minimum traders who must agree on side before an order survives"
