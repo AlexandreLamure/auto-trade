@@ -8,6 +8,7 @@ forward num_ctx, so the runner loads at the VRAM default (4096). Native
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,10 @@ class OllamaClient:
             base_url=_native_base_url(base_url),
             timeout=httpx.Timeout(600.0),
         )
+        # Ollama serves one request at a time for a model this size; queued
+        # requests would otherwise burn their read timeout while waiting.
+        # Queue client-side so the timeout only covers the active generation.
+        self._slot = asyncio.Semaphore(1)
 
     async def chat(self, messages: list[dict[str, Any]]) -> LLMResponse:
         """Send a chat request and return a structured LLMResponse."""
@@ -63,7 +68,8 @@ class OllamaClient:
                 "temperature": self._temperature,
             },
         }
-        response = await self._http.post("/api/chat", json=payload)
+        async with self._slot:
+            response = await self._http.post("/api/chat", json=payload)
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict):
