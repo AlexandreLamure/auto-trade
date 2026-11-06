@@ -1,4 +1,4 @@
-"""Vote tally and post-chair consensus gate."""
+"""Vote tally helpers for committee deliberation."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from statistics import mean, median
 
-from agent.decision import PersonaProposal, PortfolioDecision, TradeOrder
-from agent.research import ResearchBrief
-from config.settings import Settings
+from agent.decision import PersonaProposal
 
 
 @dataclass
@@ -88,88 +86,6 @@ def format_vote_tally(tallies: dict[str, SymbolTally]) -> str:
             f"{row.mean_confidence:.2f} | {row.median_qty:g} |"
         )
     return "\n".join(lines)
-
-
-def apply_consensus_gate(
-    decision: PortfolioDecision,
-    proposals: list[PersonaProposal],
-    brief: ResearchBrief,
-    settings: Settings,
-) -> PortfolioDecision:
-    """Drop chair orders that lack agreement, confidence, or a catalyst/setup."""
-    if not decision.orders:
-        return decision
-
-    tallies = tally_proposals(proposals)
-    held = {s.upper() for s in brief.held_symbols}
-    events = brief.market_events
-    has_any_events = bool(events)
-    kept: list[TradeOrder] = []
-    dropped: list[str] = []
-
-    for order in decision.orders:
-        symbol = order.symbol.upper()
-        row = tallies.get(symbol)
-        agree = row.majority_count if row and row.majority_side == order.side else 0
-        conf = row.mean_confidence if row else 0.0
-
-        if agree < settings.min_agreeing_personas:
-            dropped.append(
-                f"{order.side} {symbol}: only {agree} agreeing vote(s), "
-                f"need {settings.min_agreeing_personas}"
-            )
-            continue
-        if conf < settings.min_order_confidence:
-            dropped.append(
-                f"{order.side} {symbol}: mean confidence {conf:.2f} "
-                f"< {settings.min_order_confidence:.2f}"
-            )
-            continue
-
-        catalyst = any(
-            event.importance >= settings.events_min_importance
-            and (event.event_type or "").lower() != "macro"
-            and symbol in {t.upper() for t in event.tickers}
-            for event in events
-        )
-        held_name = symbol in held
-        if (
-            settings.require_catalyst_or_setup
-            and order.side == "buy"
-            and not held_name
-        ):
-            extra_votes = agree >= settings.min_agreeing_personas + 1
-            if has_any_events and not catalyst and not extra_votes:
-                dropped.append(f"buy {symbol}: no matching catalyst")
-                continue
-
-        kept.append(
-            TradeOrder(
-                symbol=order.symbol,
-                side=order.side,
-                quantity=order.quantity,
-                rationale=order.rationale,
-                confidence=conf,
-            )
-        )
-
-    if not dropped:
-        return PortfolioDecision(
-            orders=kept,
-            consensus_summary=decision.consensus_summary,
-            dissent=decision.dissent,
-        )
-
-    summary = decision.consensus_summary
-    note = "Gate dropped: " + "; ".join(dropped)
-    if not kept:
-        summary = (summary + " " if summary else "") + note
-        return PortfolioDecision(orders=[], consensus_summary=summary, dissent=decision.dissent)
-    return PortfolioDecision(
-        orders=kept,
-        consensus_summary=summary + " " + note,
-        dissent=decision.dissent,
-    )
 
 
 def has_disagreement(proposals: list[PersonaProposal]) -> bool:

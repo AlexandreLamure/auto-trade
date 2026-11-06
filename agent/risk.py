@@ -26,10 +26,6 @@ class ValidationContext:
     max_position_pct: float
     max_orders: int
     max_new_names: int
-    price_stats: dict[str, PriceStats]
-    risk_per_name_pct: float
-    stop_atr_multiple: float
-    stop_pct: float
 
 
 def stop_distance(
@@ -169,17 +165,6 @@ def validate_orders(
         existing_mv = ctx.held_market_value.get(order.symbol, 0.0)
         existing_mv -= sold_notional.get(order.symbol, 0.0)
         room = max(0.0, max_name_notional - max(0.0, existing_mv))
-        stats = ctx.price_stats.get(order.symbol)
-        stop_dist = stop_distance(
-            price,
-            stats,
-            stop_atr_multiple=ctx.stop_atr_multiple,
-            stop_pct=ctx.stop_pct,
-        )
-        risk_budget = equity * ctx.risk_per_name_pct if ctx.risk_per_name_pct > 0 else room
-        vol_shares = (
-            math.floor(risk_budget / stop_dist * 10000) / 10000 if stop_dist > 0 else qty
-        )
         max_shares = math.floor(room / price * 10000) / 10000 if room > 0 else 0.0
         max_affordable = math.floor(cash_remaining / price * 10000) / 10000
         cap_shares = min(max_shares, max_affordable)
@@ -203,16 +188,9 @@ def validate_orders(
                 )
                 continue
         capped = min(qty, cap_shares)
-        if vol_shares > 0:
-            if vol_shares >= 1 or cap_shares < 1:
-                capped = min(capped, vol_shares)
-            else:
-                # Small book: do not crush below 1 share when 1 share still fits the cap.
-                capped = min(capped, max(vol_shares, min(1.0, cap_shares)))
         if capped < qty:
             rejections.append(
-                f"BUY {order.symbol}: reduced qty {qty:g} → {capped:g} "
-                f"(equity cap / vol-aware stop ${stop_dist:.2f})"
+                f"BUY {order.symbol}: reduced qty {qty:g} → {capped:g} (equity/cash cap)"
             )
         qty = capped
 
@@ -250,7 +228,6 @@ def build_validation_context(
     positions_json: str,
     latest_prices: dict[str, float] | None = None,
     portfolio_equity: float = 0.0,
-    price_stats: dict[str, PriceStats] | None = None,
 ) -> ValidationContext:
     prices = latest_prices or {}
     holdings = parse_positions(positions_json)
@@ -271,8 +248,4 @@ def build_validation_context(
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
         max_new_names=settings.max_new_names_per_cycle,
-        price_stats=price_stats or {},
-        risk_per_name_pct=settings.risk_per_name_pct,
-        stop_atr_multiple=settings.stop_atr_multiple,
-        stop_pct=settings.stop_pct,
     )

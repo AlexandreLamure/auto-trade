@@ -101,15 +101,6 @@ class Settings(BaseSettings):
     )
     max_cycle_seconds: int = Field(1200, description="Hard cap on committee cycle duration (seconds)")
     max_orders_per_cycle: int = Field(3, description="Max Alpaca orders per committee cycle")
-    min_agreeing_personas: int = Field(
-        2, description="Minimum traders who must agree on side before an order survives"
-    )
-    min_order_confidence: float = Field(
-        0.55, description="Minimum mean persona confidence for a surviving order"
-    )
-    require_catalyst_or_setup: bool = Field(
-        True, description="New buys need a matching event unless extra traders agree"
-    )
     earnings_blackout_days: int = Field(
         5, description="Treat earnings/guidance events this recent as an earnings window"
     )
@@ -133,9 +124,6 @@ class Settings(BaseSettings):
         2.0, description="Stop distance as a multiple of 14-day ATR"
     )
     stop_pct: float = Field(0.08, description="Minimum stop distance as a fraction of price")
-    risk_per_name_pct: float = Field(
-        0.005, description="Equity fraction risked per name (vol-aware size)"
-    )
     enable_stops: bool = Field(True, description="Attach a stop after each buy fill")
     max_new_names_per_cycle: int = Field(
         1, description="Max new (not already held) names to buy per cycle"

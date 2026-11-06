@@ -31,7 +31,6 @@ from agent.personas import (
     build_trader_personas,
 )
 from agent.consensus import (
-    apply_consensus_gate,
     format_vote_tally,
     has_disagreement,
     tally_proposals,
@@ -138,8 +137,7 @@ As portfolio chair, synthesise the committee votes into a final consensus.
 
 Rules:
 - Start from the vote tally. Do not invent orders the traders did not support.
-- Execute a symbol only when 2+ traders agree on direction with a real thesis.
-- Up to {max_orders} orders. HOLD (empty list) when agreement or catalysts are missing.
+- Up to {max_orders} orders. HOLD (empty list) is valid.
 - Net conflicting orders on the same symbol.
 - Size buys as shares = min(cash, ~{max_position_pct:.0%} of equity) / last price from the price table.
 - Do not use median guessed qty when it implies a notional above the name cap.
@@ -286,5 +284,4 @@ async def run_committee(
             chair_turn_retry.content, extra_text=chair_turn_retry.thinking
         )
 
-    gated = apply_consensus_gate(decision, final_proposals, brief, settings)
-    return gated, final_proposals
+    return decision, final_proposals
