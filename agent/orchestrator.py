@@ -112,7 +112,6 @@ class AgentOrchestrator:
             latest_prices=brief.latest_prices,
             portfolio_equity=brief.portfolio_equity,
             price_stats=brief.price_stats,
-            earnings_flags=brief.earnings_flags,
         )
         gated_orders = portfolio_decision.orders
         approved, rejections = validate_orders(gated_orders, ctx)

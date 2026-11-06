@@ -27,11 +27,9 @@ class ValidationContext:
     max_orders: int
     max_new_names: int
     price_stats: dict[str, PriceStats]
-    earnings_flags: dict[str, str]
     risk_per_name_pct: float
     stop_atr_multiple: float
     stop_pct: float
-    block_earnings_buys: bool
 
 
 def stop_distance(
@@ -160,12 +158,6 @@ def validate_orders(
             rejections.append(f"BUY {order.symbol}: insufficient cash")
             continue
 
-        if ctx.block_earnings_buys and order.symbol in ctx.earnings_flags:
-            rejections.append(
-                f"BUY {order.symbol}: earnings window ({ctx.earnings_flags[order.symbol]})"
-            )
-            continue
-
         price = ctx.latest_prices.get(order.symbol)
         qty = order.quantity
         if not price or price <= 0:
@@ -259,7 +251,6 @@ def build_validation_context(
     latest_prices: dict[str, float] | None = None,
     portfolio_equity: float = 0.0,
     price_stats: dict[str, PriceStats] | None = None,
-    earnings_flags: dict[str, str] | None = None,
 ) -> ValidationContext:
     prices = latest_prices or {}
     holdings = parse_positions(positions_json)
@@ -281,9 +272,7 @@ def build_validation_context(
         max_orders=settings.max_orders_per_cycle,
         max_new_names=settings.max_new_names_per_cycle,
         price_stats=price_stats or {},
-        earnings_flags=earnings_flags or {},
         risk_per_name_pct=settings.risk_per_name_pct,
         stop_atr_multiple=settings.stop_atr_multiple,
         stop_pct=settings.stop_pct,
-        block_earnings_buys=settings.block_earnings_buys,
     )
