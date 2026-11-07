@@ -120,9 +120,6 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(
         0.20, description="Max fraction of portfolio equity per name (0–1)"
     )
-    max_new_names_per_cycle: int = Field(
-        1, description="Max new (not already held) names to buy per cycle"
-    )
 
     # LLM thinking mode (Qwen3 etc.)
     enable_thinking: bool = Field(True, description="Enable LLM thinking/reasoning mode")

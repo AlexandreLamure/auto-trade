@@ -24,7 +24,6 @@ class ValidationContext:
     latest_prices: dict[str, float]
     max_position_pct: float
     max_orders: int
-    max_new_names: int
 
 
 def _order_rank(order: TradeOrder, prices: dict[str, float]) -> float:
@@ -84,7 +83,6 @@ def validate_orders(
     buys = [o for o in netted if o.side != "sell"]
     buys.sort(key=lambda o: _order_rank(o, ctx.latest_prices), reverse=True)
 
-    held_symbols = set(ctx.held_quantities)
     netted = list(sells) + buys
 
     if len(netted) > ctx.max_orders:
@@ -106,7 +104,6 @@ def validate_orders(
         )
     sell_reserved: dict[str, float] = {}
     sold_notional: dict[str, float] = {}
-    new_names = 0
 
     for order in netted:
         if order.side == "sell":
@@ -133,12 +130,6 @@ def validate_orders(
 
         if max_name_notional <= 0:
             rejections.append(f"BUY {order.symbol}: max position size is zero")
-            continue
-        is_new = order.symbol not in held_symbols
-        if is_new and new_names >= ctx.max_new_names:
-            rejections.append(
-                f"BUY {order.symbol}: skipped, max {ctx.max_new_names} new name(s) this cycle"
-            )
             continue
         if cash_remaining <= 0:
             rejections.append(f"BUY {order.symbol}: insufficient cash")
@@ -195,8 +186,6 @@ def validate_orders(
             )
         )
         cash_remaining -= cost
-        if is_new:
-            new_names += 1
 
     return approved, rejections
 
@@ -227,5 +216,4 @@ def build_validation_context(
         latest_prices=prices,
         max_position_pct=settings.max_position_pct,
         max_orders=settings.max_orders_per_cycle,
-        max_new_names=settings.max_new_names_per_cycle,
     )
