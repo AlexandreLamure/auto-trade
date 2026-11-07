@@ -1,6 +1,11 @@
 """SQLite event store shared by the news service and trading agent."""
 
-from store.journal import record_cycle, update_marks
+from store.journal import (
+    format_decision_history,
+    pending_mark_symbols,
+    record_cycle,
+    update_marks,
+)
 from store.events import (
     MarketEvent,
     StoredArticle,
@@ -28,9 +33,11 @@ __all__ = [
     "find_article_event_id",
     "find_candidate_events",
     "find_unenriched_events",
+    "format_decision_history",
     "get_event_articles",
     "init_db",
     "insert_article",
+    "pending_mark_symbols",
     "prune_old_events",
     "query_events",
     "record_cycle",

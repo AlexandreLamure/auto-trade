@@ -298,7 +298,7 @@ def format_order_qty(qty: float, *, fractionable: bool) -> str | None:
     return formatted if formatted and float(formatted) > 0 else None
 
 
-def _parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
+def parse_bars_by_symbol(bars_json: str) -> dict[str, list[dict[str, Any]]]:
     """Return OHLCV bar lists keyed by symbol from get_stock_bars JSON."""
     raw = parse_mcp_json(bars_json)
     if raw is None:
@@ -322,7 +322,7 @@ def merge_bars_json(parts: list[str]) -> str:
     for text in parts:
         if not text or text.startswith("ERROR"):
             continue
-        merged.update(_parse_bars_by_symbol(text))
+        merged.update(parse_bars_by_symbol(text))
     return json.dumps({"bars": merged})
 
 
@@ -330,7 +330,7 @@ def compute_price_stats(
     bars_json: str, symbols: list[str] | None = None
 ) -> dict[str, PriceStats]:
     """Per-symbol returns, ATR, realized vol, and average volume from daily bars."""
-    bars_by_symbol = _parse_bars_by_symbol(bars_json)
+    bars_by_symbol = parse_bars_by_symbol(bars_json)
     if symbols is not None:
         allow = {s.upper() for s in symbols}
         bars_by_symbol = {
@@ -488,7 +488,7 @@ def filter_liquid_candidates(
     min_adv_shares: float,
 ) -> list[str]:
     """Drop warrants, sub-min-price names, and thin volume from candidates."""
-    bars_by_symbol = _parse_bars_by_symbol(bars_json)
+    bars_by_symbol = parse_bars_by_symbol(bars_json)
     kept: list[str] = []
     for symbol in candidates:
         if not is_tradeable_equity_symbol(symbol):

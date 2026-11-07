@@ -29,14 +29,19 @@ from agent.workflow import (
     stop_price_of,
 )
 from agent.deliberation import run_committee
-from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
+from agent.research import (
+    ResearchBrief,
+    enrich_brief_prices,
+    refresh_journal_marks,
+    run_deep_research,
+)
 from agent.risk import (
     build_validation_context,
     stop_distance,
     validate_orders,
 )
 from store import MarketEvent
-from store.journal import record_cycle, update_marks
+from store.journal import record_cycle
 from util.cycle_log import CycleLog, get_trading_log
 from util.llm_client import OllamaClient
 from util.session import is_market_open, market_closed_message
@@ -82,13 +87,14 @@ class AgentOrchestrator:
     async def _run_committee_cycle(
         self, manager: MCPManager, log: CycleLog, cycle_id: str
     ) -> None:
-        brief = await run_deep_research(manager, self._settings)
+        # Marks first, so the brief's decision history shows fresh outcomes.
         try:
-            marked = update_marks(self._settings.event_store_path, brief.latest_prices)
+            marked = await refresh_journal_marks(manager, self._settings)
             if marked:
                 log.line(f"Journal: updated {marked} outcome mark(s)")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Journal mark update failed: %s", exc)
+        brief = await run_deep_research(manager, self._settings)
         _log_portfolio(brief, log)
         _log_mcp_calls(brief, log)
         _log_market_events(brief, self._settings, log)

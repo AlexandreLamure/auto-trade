@@ -135,46 +135,56 @@ def record_cycle(
         conn.commit()
 
 
-def update_marks(db_path: str, prices: dict[str, float]) -> int:
-    """Fill 1d/5d/30d marks when enough time has passed and a price is available."""
-    now = utcnow()
+# (calendar days after the decision, price column, marked-at column)
+_MARK_HORIZONS = ((1, "price_1d", "marked_1d_at"), (5, "price_5d", "marked_5d_at"),
+                  (30, "price_30d", "marked_30d_at"))
+# Marks older than this are final; the window covers the 30d horizon plus slack.
+MARK_WINDOW_DAYS = 60
+
+
+def _started_utc(value: object):
+    started = parse_iso(str(value))
+    if started is not None and started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return started
+
+
+def _open_mark_rows(conn) -> list[Any]:
+    cutoff = utcnow() - timedelta(days=MARK_WINDOW_DAYS)
+    rows = conn.execute("SELECT * FROM cycle_marks").fetchall()
+    return [r for r in rows if (s := _started_utc(r["started_at"])) and s >= cutoff]
+
+
+def pending_mark_symbols(db_path: str) -> list[str]:
+    """Symbols whose decision marks are still inside the marking window."""
+    with get_connection(db_path) as conn:
+        return sorted({str(r["symbol"]).upper() for r in _open_mark_rows(conn)})
+
+
+def update_marks(db_path: str, closes: dict[str, list[tuple[str, float]]]) -> int:
+    """Set 1d/5d/30d marks to the first daily close on/after each horizon date.
+
+    *closes* maps symbol -> [(YYYY-MM-DD, close)] in ascending date order.
+    Recomputed from bars on every call, so earlier marks are corrected too.
+    """
+    now_iso = to_iso(utcnow())
     updated = 0
     with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT cycle_id, symbol, started_at, decision_price,
-                   price_1d, price_5d, price_30d
-            FROM cycle_marks
-            """
-        ).fetchall()
-        for row in rows:
+        for row in _open_mark_rows(conn):
             symbol = str(row["symbol"]).upper()
-            price = prices.get(symbol)
-            if price is None or price <= 0:
+            series = closes.get(symbol)
+            started = _started_utc(row["started_at"])
+            if not series or started is None:
                 continue
-            started = parse_iso(str(row["started_at"]))
-            if started is None:
-                continue
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            age = now - started
             fields: list[str] = []
             values: list[object] = []
-            if row["price_1d"] is None and age >= timedelta(days=1):
-                fields.append("price_1d = ?")
-                values.append(price)
-                fields.append("marked_1d_at = ?")
-                values.append(to_iso(now))
-            if row["price_5d"] is None and age >= timedelta(days=5):
-                fields.append("price_5d = ?")
-                values.append(price)
-                fields.append("marked_5d_at = ?")
-                values.append(to_iso(now))
-            if row["price_30d"] is None and age >= timedelta(days=30):
-                fields.append("price_30d = ?")
-                values.append(price)
-                fields.append("marked_30d_at = ?")
-                values.append(to_iso(now))
+            for days, price_col, marked_col in _MARK_HORIZONS:
+                target = (started + timedelta(days=days)).date().isoformat()
+                close = next((c for d, c in series if d >= target and c > 0), None)
+                if close is None or row[price_col] == close:
+                    continue
+                fields += [f"{price_col} = ?", f"{marked_col} = ?"]
+                values += [close, now_iso]
             if not fields:
                 continue
             values.extend([row["cycle_id"], symbol])
@@ -185,3 +195,44 @@ def update_marks(db_path: str, prices: dict[str, float]) -> int:
             updated += 1
         conn.commit()
     return updated
+
+
+def _pct(price: float | None, base: float | None) -> str:
+    if not price or not base:
+        return "—"
+    return f"{(price / base - 1.0) * 100.0:+.1f}%"
+
+
+def format_decision_history(db_path: str, *, limit: int = 12) -> str:
+    """Markdown table of recent committee orders and the price move afterwards."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.started_at, o.symbol, o.side, o.status, o.rationale,
+                   m.decision_price, m.price_1d, m.price_5d, m.price_30d
+            FROM cycle_orders o
+            JOIN cycles c ON c.id = o.cycle_id
+            LEFT JOIN cycle_marks m ON m.cycle_id = o.cycle_id AND m.symbol = o.symbol
+            ORDER BY c.started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    if not rows:
+        return ""
+    lines = [
+        "Price change after each past committee order (executed or not). "
+        "For a sell, a drop means the call was right.",
+        "",
+        "| Date | Symbol | Side | Status | Decision price | +1d | +5d | +30d | Rationale |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for r in rows:
+        base = r["decision_price"]
+        rationale = " ".join(str(r["rationale"] or "").split())[:120]
+        lines.append(
+            f"| {str(r['started_at'])[:10]} | {r['symbol']} | {r['side']} | {r['status']} | "
+            f"{f'${base:.2f}' if base else '—'} | {_pct(r['price_1d'], base)} | "
+            f"{_pct(r['price_5d'], base)} | {_pct(r['price_30d'], base)} | {rationale} |"
+        )
+    return "\n".join(lines)

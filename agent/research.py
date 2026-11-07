@@ -40,15 +40,19 @@ from agent.workflow import (
     filter_liquid_candidates,
     merge_bars_json,
     parse_asset_name,
+    parse_bars_by_symbol,
     parse_latest_prices,
 )
 from store import (
     MarketEvent,
     StoredArticle,
     discover_event_tickers,
+    format_decision_history,
     get_event_articles,
     init_db,
+    pending_mark_symbols,
     query_events,
+    update_marks,
 )
 from util.symbols import sanitize_symbol_list
 from util.time import utcnow
@@ -353,6 +357,7 @@ def _build_summary(
     section_titles = {
         "holdings": "Holdings",
         "price_analytics": "Price analytics",
+        "decision_history": "Your recent decisions and what happened next",
         "recent_orders": "Recent orders",
         "movers_summary": "Market movers",
         "market_events": "Market events",
@@ -363,6 +368,26 @@ def _build_summary(
             lines.extend([f"## {title}", "", body, ""])
 
     return "\n".join(lines)
+
+
+async def refresh_journal_marks(manager: MCPManager, settings: Settings) -> int:
+    """Fetch daily bars for journaled symbols and set their 1d/5d/30d marks."""
+    db_path = settings.event_store_path
+    if not Path(db_path).exists():
+        return 0
+    init_db(db_path)
+    symbols = pending_mark_symbols(db_path)
+    if not symbols:
+        return 0
+    bars = await _fetch_stock_bars(manager, symbols, [])
+    closes = {
+        symbol: [
+            (str(b.get("t", ""))[:10], parse_float_field(b.get("c") or b.get("close")))
+            for b in series
+        ]
+        for symbol, series in parse_bars_by_symbol(bars).items()
+    }
+    return update_marks(db_path, closes)
 
 
 async def run_deep_research(
@@ -451,6 +476,8 @@ async def run_deep_research(
 
     events_text, market_events = load_market_events(all_symbols, settings)
     sections["market_events"] = events_text
+    if Path(settings.event_store_path).exists():
+        sections["decision_history"] = format_decision_history(settings.event_store_path)
 
     all_symbols = list(dict.fromkeys(held + candidates))
     earn_flags = earnings_flags_from_events(
