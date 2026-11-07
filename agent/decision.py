@@ -32,6 +32,7 @@ class TradeOrder:
     quantity: float
     rationale: str
     confidence: float = 0.0
+    stop_price: float | None = None  # buys only; None = no protective stop
 
 
 @dataclass
@@ -80,6 +81,7 @@ def order_to_dict(order: TradeOrder) -> dict[str, Any]:
         "quantity": order.quantity,
         "qty": order.quantity,
         "rationale": order.rationale,
+        "stop_price": order.stop_price,
     }
 
 
@@ -210,7 +212,19 @@ def _parse_order_list(raw_orders: Any) -> list[TradeOrder]:
         if not symbol or qty <= 0:
             continue
         rationale = str(item.get("rationale", item.get("reasoning", ""))).strip()
-        orders.append(TradeOrder(symbol=symbol, side=side_raw, quantity=qty, rationale=rationale))
+        try:
+            stop = float(item.get("stop_price") or 0)
+        except (TypeError, ValueError):
+            stop = 0.0
+        orders.append(
+            TradeOrder(
+                symbol=symbol,
+                side=side_raw,
+                quantity=qty,
+                rationale=rationale,
+                stop_price=stop if stop > 0 and side_raw == "buy" else None,
+            )
+        )
     return orders
 
 

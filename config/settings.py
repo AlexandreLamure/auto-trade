@@ -120,11 +120,6 @@ class Settings(BaseSettings):
     max_position_pct: float = Field(
         0.20, description="Max fraction of portfolio equity per name (0–1)"
     )
-    stop_atr_multiple: float = Field(
-        2.0, description="Stop distance as a multiple of 14-day ATR"
-    )
-    stop_pct: float = Field(0.08, description="Minimum stop distance as a fraction of price")
-    enable_stops: bool = Field(True, description="Attach a stop after each buy fill")
     max_new_names_per_cycle: int = Field(
         1, description="Max new (not already held) names to buy per cycle"
     )

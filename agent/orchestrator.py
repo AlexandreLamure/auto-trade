@@ -35,11 +35,7 @@ from agent.research import (
     refresh_journal_marks,
     run_deep_research,
 )
-from agent.risk import (
-    build_validation_context,
-    stop_distance,
-    validate_orders,
-)
+from agent.risk import build_validation_context, validate_orders
 from store import MarketEvent
 from store.journal import record_cycle
 from util.cycle_log import CycleLog, get_trading_log
@@ -220,19 +216,16 @@ class AgentOrchestrator:
                     logger.warning("Asset lookup failed for %s: %s", order.symbol, exc)
                 log.line(f"  Asset {order.symbol}: fractionable={fractionable}")
 
-                stop_px = 0.0
-                if order.side == "buy" and self._settings.enable_stops:
-                    ref = ask if ask > 0 else last
-                    if ref > 0:
-                        dist = stop_distance(
-                            ref,
-                            brief.price_stats.get(order.symbol),
-                            stop_atr_multiple=self._settings.stop_atr_multiple,
-                            stop_pct=self._settings.stop_pct,
-                        )
-                        stop_px = round(ref - dist, 2)
-                        if not 0 < stop_px < ref:
-                            stop_px = 0.0
+                # The committee chooses the stop (or none); only check it is
+                # below the entry reference, as Alpaca requires.
+                stop_px = round(order.stop_price or 0.0, 2)
+                ref = ask if ask > 0 else last
+                if stop_px > 0 and not (ref > 0 and stop_px < ref):
+                    log.line(
+                        f"  Stop ${stop_px:.2f} on {order.symbol} ignored: "
+                        f"not below entry ref ${ref:.2f}"
+                    )
+                    stop_px = 0.0
 
                 # Alpaca rejects fractional qty on OTO orders (simple only), so a
                 # stop-protected buy is floored to whole shares when it can be.
@@ -505,7 +498,8 @@ def _log_decision(decision: PortfolioDecision, log: CycleLog) -> None:
     log.section("Decision")
     if decision.is_trade():
         for order in decision.orders:
-            log.line(f"Decision: {order.side.upper()} {order.symbol} x{order.quantity:g}")
+            stop = f" stop ${order.stop_price:.2f}" if order.stop_price else ""
+            log.line(f"Decision: {order.side.upper()} {order.symbol} x{order.quantity:g}{stop}")
     else:
         log.line("Decision: HOLD")
     if decision.consensus_summary:

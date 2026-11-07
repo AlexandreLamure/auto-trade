@@ -172,7 +172,7 @@ auto-trade/
 ## Notes and limitations
 
 - **Paper trading only by default.** Set `ALPACA_PAPER_TRADE=false` and use live keys to trade with real money — do so at your own risk.
-- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names. Stop-protected buys are OTO `gtc` orders, floored to whole shares (Alpaca rejects fractional OTO); a buy under 1 share gets no stop. Open orders on a symbol are cancelled before trading it (a stop reserves the shares); a partial sell re-places the stop on the remainder.
+- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names. The committee picks each buy's stop price (or none); a stopped buy is an OTO `gtc` order floored to whole shares (Alpaca rejects fractional OTO), and a buy under 1 share gets no stop. Open orders on a symbol are cancelled before trading it (a stop reserves the shares); a partial sell re-places the stop on the remainder.
 - Run `python main.py --news-once` (while the cash session is open) to populate the event store before the first `--trade-once`.
 - RSS feeds run without API keys; optional API keys extend coverage.
 - Model quality matters for JSON-only persona output. `qwen2.5:7b` is the documented minimum; larger models (e.g. Qwen3) work better with `ENABLE_THINKING=true`.

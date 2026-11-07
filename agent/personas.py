@@ -25,7 +25,7 @@ PROPOSAL_JSON_SCHEMA = """\
 {
   "stance": "BUY",
   "orders": [
-    {"symbol": "AAPL", "side": "buy", "qty": 1.5, "rationale": "short reason"}
+    {"symbol": "AAPL", "side": "buy", "qty": 1.5, "stop_price": 182.5, "rationale": "short reason"}
   ],
   "confidence": 0.72,
   "key_points": ["point one", "point two"]
@@ -38,7 +38,7 @@ DEBATE_JSON_SCHEMA = """\
 {
   "stance": "SELL",
   "orders": [
-    {"symbol": "AAPL", "side": "sell", "qty": 20, "rationale": "revised view"}
+    {"symbol": "AAPL", "side": "sell", "qty": 20, "stop_price": null, "rationale": "revised view"}
   ],
   "confidence": 0.65,
   "key_points": ["agree/disagree summary"],
@@ -51,8 +51,8 @@ CHAIR_JSON_SCHEMA = """\
 ```json
 {
   "orders": [
-    {"symbol": "AAPL", "side": "buy", "qty": 1.25, "rationale": "committee rationale"},
-    {"symbol": "TSLA", "side": "sell", "qty": 15, "rationale": "trim loser"}
+    {"symbol": "AAPL", "side": "buy", "qty": 1.25, "stop_price": 182.5, "rationale": "committee rationale"},
+    {"symbol": "TSLA", "side": "sell", "qty": 15, "stop_price": null, "rationale": "trim loser"}
   ],
   "consensus_summary": "3-5 sentences on the final portfolio action",
   "dissent": "optional minority view or null"
@@ -73,6 +73,8 @@ Only US equities. You may propose up to {max_orders} orders.
 - Size from conviction using the price table: qty = min(available cash, {max_position_pct:.0%} of equity) / last price.
   Do not invent share counts. Do not spray token probes. Fractional qty is allowed.
 - Sells should be decisive when a holding is wrong or capital is better used elsewhere.
+- stop_price (buys only): a protective stop below entry that you choose from the thesis and
+  volatility (ATR, realized vol), or null for no stop. Stopped-out positions are sold automatically.
 - Use the Identity section for held names (ticker is the listed equity, not a similarly named crypto token).
 
 ## Output format

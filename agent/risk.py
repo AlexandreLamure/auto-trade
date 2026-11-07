@@ -10,8 +10,7 @@ from dataclasses import dataclass
 
 from agent.decision import TradeOrder
 from config.settings import Settings
-from servers.portfolio import Position, parse_positions
-from agent.workflow import PriceStats
+from servers.portfolio import parse_positions
 
 logger = logging.getLogger(__name__)
 
@@ -28,19 +27,6 @@ class ValidationContext:
     max_new_names: int
 
 
-def stop_distance(
-    price: float,
-    stats: PriceStats | None,
-    *,
-    stop_atr_multiple: float,
-    stop_pct: float,
-) -> float:
-    """Dollar distance from price to stop, using ATR with a percent floor."""
-    atr_stop = (stats.atr * stop_atr_multiple) if stats and stats.atr > 0 else 0.0
-    pct_stop = price * stop_pct
-    return max(atr_stop, pct_stop, price * 0.02)
-
-
 def _order_rank(order: TradeOrder, prices: dict[str, float]) -> float:
     notional = order.quantity * (prices.get(order.symbol, 0.0) or 1.0)
     return order.confidence * notional if order.confidence else notional
@@ -55,12 +41,15 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
     nets: dict[tuple[str, str], float] = {}
     rationales: dict[tuple[str, str], str] = {}
     confidences: dict[tuple[str, str], float] = {}
+    stops: dict[tuple[str, str], float] = {}
     for order in orders:
         key = (order.symbol, order.side)
         nets[key] = nets.get(key, 0.0) + order.quantity
         if order.rationale:
             rationales[key] = order.rationale
         confidences[key] = max(confidences.get(key, 0.0), order.confidence)
+        if order.stop_price:
+            stops[key] = order.stop_price
     result: list[TradeOrder] = []
     for (symbol, side), qty in nets.items():
         if qty <= 0:
@@ -72,6 +61,7 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
                 quantity=qty,
                 rationale=rationales.get((symbol, side), ""),
                 confidence=confidences.get((symbol, side), 0.0),
+                stop_price=stops.get((symbol, side)),
             )
         )
     return result
@@ -201,6 +191,7 @@ def validate_orders(
                 side="buy",
                 quantity=qty,
                 rationale=order.rationale,
+                stop_price=order.stop_price,
             )
         )
         cash_remaining -= cost
