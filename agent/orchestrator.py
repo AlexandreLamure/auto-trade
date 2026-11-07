@@ -10,6 +10,7 @@ Each call to run_cycle():
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ from agent.workflow import (
     format_order_qty,
     parse_fractionable,
     parse_nbbo,
+    parse_open_orders,
     parse_order_status,
+    stop_price_of,
 )
 from agent.deliberation import run_committee
 from agent.research import ResearchBrief, enrich_brief_prices, run_deep_research
@@ -165,8 +168,15 @@ class AgentOrchestrator:
         brief: ResearchBrief,
     ) -> list[ExecutionRecord]:
         fills: list[ExecutionRecord] = []
+        held = {pos.symbol: pos.qty for pos in brief.holdings}
         for order in orders:
+            prior_stop = 0.0
             try:
+                # Open stop legs reserve the shares (a sell would be rejected) and
+                # stale gtc entries could double a buy: clear them first.
+                prior_stop = await _clear_open_orders(
+                    manager, order.symbol, all_sides=order.side == "sell", log=log
+                )
                 quote_text = ""
                 try:
                     # IEX is the free real-time feed; SIP latest needs a paid plan.
@@ -231,6 +241,14 @@ class AgentOrchestrator:
                         "(will not round up past the risk cap)"
                     )
                     log.line(reason)
+                    if prior_stop > 0:
+                        await _restore_stop(
+                            manager,
+                            order.symbol,
+                            remaining=held.get(order.symbol, 0.0),
+                            stop_price=prior_stop,
+                            log=log,
+                        )
                     fills.append(
                         ExecutionRecord(
                             symbol=order.symbol,
@@ -289,6 +307,16 @@ class AgentOrchestrator:
                 log.line(f"  {summary}")
                 if failed:
                     log.line(f"  Order error: {result_text}")
+                if order.side == "sell" and prior_stop > 0:
+                    sold = 0.0 if failed else submitted_qty
+                    await _restore_stop(
+                        manager,
+                        order.symbol,
+                        remaining=held.get(order.symbol, 0.0) - sold,
+                        stop_price=prior_stop,
+                        log=log,
+                    )
+                    prior_stop = 0.0
                 if use_limit:
                     ref = last if last > 0 else (ask or bid)
                     if ref > 0:
@@ -311,6 +339,19 @@ class AgentOrchestrator:
                 log.line(
                     f"{order.side.upper()} {order.symbol} x{order.quantity:g} → error"
                 )
+                if prior_stop > 0:
+                    try:
+                        await _restore_stop(
+                            manager,
+                            order.symbol,
+                            remaining=held.get(order.symbol, 0.0),
+                            stop_price=prior_stop,
+                            log=log,
+                        )
+                    except Exception as restore_exc:  # noqa: BLE001
+                        logger.error(
+                            "Stop restore failed for %s: %s", order.symbol, restore_exc
+                        )
                 fills.append(
                     ExecutionRecord(
                         symbol=order.symbol,
@@ -321,6 +362,83 @@ class AgentOrchestrator:
                     )
                 )
         return fills
+
+
+_CANCEL_POLL_SECONDS = 0.5
+_CANCEL_POLL_TRIES = 10
+
+
+async def _list_open_orders(manager: MCPManager, symbol: str) -> list[dict]:
+    result = await manager.call_tool(
+        "get_orders", {"status": "open", "symbols": symbol, "nested": True}
+    )
+    return parse_open_orders(manager.result_to_text(result))
+
+
+async def _clear_open_orders(
+    manager: MCPManager, symbol: str, *, all_sides: bool, log: CycleLog
+) -> float:
+    """Cancel open orders on *symbol* (buys only unless *all_sides*).
+
+    Waits for Alpaca's async cancel to settle so the shares are released.
+    Returns the highest cancelled sell-stop price, or 0.
+    """
+    def _targets(open_orders: list[dict]) -> list[dict]:
+        return [
+            o for o in open_orders
+            if all_sides or str(o.get("side", "")).lower() == "buy"
+        ]
+
+    try:
+        targets = _targets(await _list_open_orders(manager, symbol))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Open-order lookup failed for %s: %s", symbol, exc)
+        return 0.0
+    if not targets:
+        return 0.0
+
+    prior_stop = max(stop_price_of(o) for o in targets)
+    for o in targets:
+        await manager.call_tool("cancel_order_by_id", {"order_id": str(o["id"])})
+        log.line(
+            f"  Cancelled open {o.get('side')} {o.get('type')} {symbol} "
+            f"({o.get('status')}, id {str(o['id'])[:8]})"
+        )
+    for _ in range(_CANCEL_POLL_TRIES):
+        if not _targets(await _list_open_orders(manager, symbol)):
+            break
+        await asyncio.sleep(_CANCEL_POLL_SECONDS)
+    else:
+        logger.warning("Open orders on %s still pending cancel", symbol)
+    return prior_stop
+
+
+async def _restore_stop(
+    manager: MCPManager,
+    symbol: str,
+    *,
+    remaining: float,
+    stop_price: float,
+    log: CycleLog,
+) -> None:
+    """Re-place a gtc stop for shares left after a partial sell (whole shares only)."""
+    whole = int(remaining)
+    if whole < 1:
+        return
+    payload = {
+        "symbol": symbol,
+        "side": "sell",
+        "qty": str(whole),
+        "type": "stop",
+        "stop_price": f"{stop_price:.2f}",
+        "time_in_force": "gtc",
+    }
+    result = await manager.call_tool("place_stock_order", payload)
+    text = manager.result_to_text(result)
+    status = "failed" if result.isError else parse_order_status(text)
+    log.line(f"  Re-placed stop {symbol} x{whole} @ ${stop_price:.2f} → {status}")
+    if status in {"failed", "rejected"}:
+        logger.warning("Stop restore failed for %s: %s", symbol, text)
 
 
 def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:

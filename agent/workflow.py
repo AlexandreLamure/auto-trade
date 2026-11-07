@@ -227,6 +227,32 @@ def parse_order_status(order_json: str) -> str:
     return "submitted"
 
 
+def parse_open_orders(orders_json: str) -> list[dict[str, Any]]:
+    """Top-level orders from get_orders(nested=true); OTO stop legs stay under 'legs'."""
+    if orders_json.startswith("ERROR"):
+        return []
+    raw = parse_mcp_json(orders_json)
+    if raw is None:
+        return []
+    payload = unwrap_alpaca_payload(raw)
+    if isinstance(payload, dict):
+        payload = payload.get("orders") or payload.get("result") or []
+    if not isinstance(payload, list):
+        return []
+    return [o for o in payload if isinstance(o, dict) and o.get("id")]
+
+
+def stop_price_of(order: dict[str, Any]) -> float:
+    """Highest sell-stop price on an order or its legs (0 when none)."""
+    best = 0.0
+    for item in [order, *(order.get("legs") or [])]:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("side", "")).lower() == "sell" and "stop" in str(item.get("type", "")):
+            best = max(best, parse_float_field(item.get("stop_price")))
+    return best
+
+
 def _find_key(obj: Any, key: str, *, depth: int = 0) -> Any:
     if depth > 6 or obj is None:
         return None
