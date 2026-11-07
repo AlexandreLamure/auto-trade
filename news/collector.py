@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 
 from config.settings import Settings
 from news.models import Signal
+from news.sources.alpaca_news import fetch_alpaca_news
 from news.sources.alpha_vantage import fetch_alpha_vantage
 from news.sources.base import normalize_url, url_hash
 from news.sources.finnhub import fetch_finnhub
@@ -35,6 +36,15 @@ def _build_source_tasks(settings: Settings, watchlist: list[str]) -> list[Source
             "rss",
             lambda: fetch_rss(watchlist),
             True,
+        ),
+        (
+            "alpaca_news",
+            lambda: fetch_alpaca_news(
+                settings.alpaca_api_key,
+                settings.alpaca_secret_key,
+                watchlist_tickers=watchlist,
+            ),
+            settings.enable_alpaca_news,
         ),
         (
             "newsapi",

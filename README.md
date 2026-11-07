@@ -34,7 +34,8 @@ main.py  (--news-once | --trade-once | --once | --loop | --clean)
 
 **News cycle**: resolves a dynamic watchlist from Alpaca (held positions +
 gainers/losers + event tickers, same as the trading agent); fetches from RSS
-(first-class), NewsAPI, Finnhub, Alpha Vantage, and Marketaux; deduplicates
+(first-class), Alpaca news (Benzinga), NewsAPI, Finnhub, Alpha Vantage, and
+Marketaux; deduplicates
 articles; groups into market events; LLM-enriches each event with summary,
 sentiment, importance, and tickers. Skips immediately if the US cash session
 is closed.
