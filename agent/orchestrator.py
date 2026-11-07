@@ -245,6 +245,8 @@ class AgentOrchestrator:
                         )
                         stop_px = round(ref - dist, 2)
                         if 0 < stop_px < ref:
+                            # Bracket needs a take-profit leg; OTO accepts a lone stop-loss.
+                            payload["order_class"] = "oto"
                             payload["stop_loss_stop_price"] = str(stop_px)
                 result = await manager.call_tool("place_stock_order", payload)
                 result_text = manager.result_to_text(result)
@@ -255,6 +257,7 @@ class AgentOrchestrator:
                     result_text,
                 )
                 status = "failed" if failed else parse_order_status(result_text)
+                failed = failed or status in {"failed", "rejected"}
                 fills.append(
                     ExecutionRecord(
                         symbol=order.symbol,
@@ -268,6 +271,8 @@ class AgentOrchestrator:
                     f"{order.side.upper()} {order.symbol} x{qty_str} → {status}"
                 )
                 log.line(f"  {summary}")
+                if failed:
+                    log.line(f"  Order error: {result_text}")
                 if use_limit:
                     ref = last if last > 0 else (ask or bid)
                     if ref > 0:

@@ -212,6 +212,8 @@ def parse_order_status(order_json: str) -> str:
     if raw is None:
         return "submitted"
     payload = unwrap_alpaca_payload(raw)
+    if _find_key(payload, "error") is not None:
+        return "failed"
     status = _find_key(payload, "status")
     if not status:
         return "submitted"
