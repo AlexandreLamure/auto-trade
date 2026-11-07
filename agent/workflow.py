@@ -41,6 +41,8 @@ class PriceStats:
     realized_vol: float
     adv_shares: float
     dollar_adv: float
+    dist_ma50: float | None = None
+    dist_ma200: float | None = None
 
 
 def format_mcp_summary(name: str, args: dict[str, Any], result_text: str) -> str:
@@ -348,8 +350,8 @@ def compute_price_stats(
         ret_1d = ((closes[-1] / closes[-2]) - 1.0) * 100.0 if len(closes) >= 2 and closes[-2] else 0.0
         ret_5d = ((closes[-1] / closes[-6]) - 1.0) * 100.0 if len(closes) >= 6 and closes[-6] else 0.0
         ret_20d = ((closes[-1] / closes[-21]) - 1.0) * 100.0 if len(closes) >= 21 and closes[-21] else 0.0
-        high_30 = max(closes)
-        dist_high = ((price / high_30) - 1.0) * 100.0 if high_30 > 0 else 0.0
+        high_52w = max(closes[-252:])
+        dist_high = ((price / high_52w) - 1.0) * 100.0 if high_52w > 0 else 0.0
         recent_vols = volumes[-20:] or volumes
         vol_avg = sum(recent_vols) / len(recent_vols) if recent_vols else 0.0
         vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1.0
@@ -387,8 +389,22 @@ def compute_price_stats(
             realized_vol=realized_vol,
             adv_shares=vol_avg,
             dollar_adv=dollar_adv,
+            dist_ma50=_dist_from_ma(closes, 50),
+            dist_ma200=_dist_from_ma(closes, 200),
         )
     return stats
+
+
+def _dist_from_ma(closes: list[float], window: int) -> float | None:
+    """Percent distance of the last close from its simple moving average."""
+    if len(closes) < window:
+        return None
+    ma = sum(closes[-window:]) / window
+    return ((closes[-1] / ma) - 1.0) * 100.0 if ma > 0 else None
+
+
+def _fmt_pct(value: float | None) -> str:
+    return "—" if value is None else f"{value:+.1f}%"
 
 
 def compute_price_analytics(
@@ -403,17 +419,23 @@ def compute_price_analytics(
         return "_No price analytics available._"
 
     lines = [
-        "| Symbol | Price | 1d% | 5d% | 20d% | ATR | Vol (ann) | ADV $ | vs 30d High | Earn |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Symbol | Price | 1d% | 5d% | 20d% | vs 50d MA | vs 200d MA | vs 52w high "
+        "| Volume ÷ 20d avg | ATR(14) | Realized vol (ann.) | Avg $ volume | Earnings news |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for symbol in sorted(stats):
         row = stats[symbol]
         earn = (earnings or {}).get(symbol, "—")
         lines.append(
             f"| {symbol} | ${row.price:.2f} | {row.ret_1d:+.1f}% | {row.ret_5d:+.1f}% | "
-            f"{row.ret_20d:+.1f}% | ${row.atr:.2f} | {row.realized_vol * 100:.0f}% | "
-            f"${row.dollar_adv/1e6:.1f}M | {row.dist_high:+.1f}% | {earn} |"
+            f"{row.ret_20d:+.1f}% | {_fmt_pct(row.dist_ma50)} | {_fmt_pct(row.dist_ma200)} | "
+            f"{row.dist_high:+.1f}% | {row.vol_ratio:.2f}x | ${row.atr:.2f} | "
+            f"{row.realized_vol * 100:.0f}% | ${row.dollar_adv/1e6:,.0f}M | {earn} |"
         )
+    lines.append(
+        "\nVolume ÷ 20d avg: last session's share volume vs its 20-session average "
+        "(1.00x = normal). Realized vol: annualized std-dev of daily returns, not volume."
+    )
     return "\n".join(lines)
 
 

@@ -23,6 +23,8 @@ from servers.portfolio import (
     call_mcp_tool,
     estimate_days_held,
     format_holdings_table,
+    format_movers,
+    format_recent_orders,
     load_positions_and_movers,
     parse_float_field,
     parse_mcp_json,
@@ -49,10 +51,11 @@ from store import (
     query_events,
 )
 from util.symbols import sanitize_symbol_list
-from util.text import truncate_text
 from util.time import utcnow
 
 logger = logging.getLogger(__name__)
+
+BARS_LOOKBACK_DAYS = 400
 
 
 @dataclass
@@ -143,12 +146,11 @@ def _format_event(event: MarketEvent, articles: list[StoredArticle]) -> str:
     companies = ", ".join(event.companies) if event.companies else "—"
     updated = event.last_seen_at.strftime("%Y-%m-%d %H:%M UTC")
     lines = [
-        f"### {event.summary}",
-        f"- Type: {event.event_type} | Sentiment: {event.sentiment} | "
-        f"Importance: {event.importance}/5 | Confidence: {event.confidence:.0%}",
-        f"- Tickers: {tickers} | Companies: {companies}",
+        f"### [{tickers}] {event.event_type}",
+        f"- {event.summary}",
+        f"- Sentiment: {event.sentiment} | Importance: {event.importance}/5 | "
+        f"Confidence: {event.confidence:.0%} | Companies: {companies}",
         f"- Articles: {event.article_count} | Last updated: {updated}",
-        f"- Summary: {event.summary}",
     ]
     if articles:
         lines.append("- Sources:")
@@ -246,7 +248,9 @@ async def _fetch_stock_bars(
             {
                 "symbols": ",".join(chunk),
                 "timeframe": "1Day",
-                "days": HORIZON_DAYS,
+                # ~275 sessions: enough for the 200d MA and 52-week high.
+                "days": BARS_LOOKBACK_DAYS,
+                "limit": 10000,
                 "end": end,
                 "feed": "sip",
             },
@@ -345,23 +349,17 @@ def _build_summary(
         "",
     ]
 
+    # Raw Alpaca JSON stays in sections for code; only formatted views are rendered.
     section_titles = {
         "holdings": "Holdings",
         "price_analytics": "Price analytics",
-        "account": "Account",
-        "portfolio_history": f"Portfolio history ({HORIZON_DAYS}d)",
-        "orders": "Recent orders",
-        "movers": "Market movers",
+        "recent_orders": "Recent orders",
+        "movers_summary": "Market movers",
         "market_events": "Market events",
     }
-    mcp_json_sections = frozenset(
-        {"account", "portfolio_history", "orders", "movers"}
-    )
     for key, title in section_titles.items():
         body = sections.get(key, "").strip()
         if body:
-            if key in mcp_json_sections:
-                body = truncate_text(body, 4000)
             lines.extend([f"## {title}", "", body, ""])
 
     return "\n".join(lines)
@@ -406,6 +404,7 @@ async def run_deep_research(
         tool_call_log=log,
     )
     sections["orders"] = orders
+    sections["recent_orders"] = format_recent_orders(orders)
 
     holdings = parse_positions(snapshot.positions_json)
     days_held = estimate_days_held(orders)
@@ -413,6 +412,9 @@ async def run_deep_research(
         pos.days_held = days_held.get(pos.symbol)
 
     sections["movers"] = snapshot.movers_json
+    sections["movers_summary"] = format_movers(
+        snapshot.movers_json, min_price=settings.min_candidate_price
+    )
     mover_symbols = snapshot.mover_symbols
 
     event_tickers = _discover_symbols_from_events(settings, held)

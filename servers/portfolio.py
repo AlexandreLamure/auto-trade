@@ -260,6 +260,71 @@ def _rank_mover_side(items: Any, *, min_price: float, limit: int) -> list[str]:
     return symbols
 
 
+def format_movers(movers_json: str, *, min_price: float, limit: int = 8) -> str:
+    """One line each for top gainers and losers, excluding warrants and sub-min-price names."""
+    raw = parse_mcp_json(movers_json)
+    payload = unwrap_alpaca_payload(raw) if raw is not None else None
+    if not isinstance(payload, dict):
+        return ""
+    lines: list[str] = []
+    for key, label in (("gainers", "Top gainers"), ("losers", "Top losers")):
+        items: list[str] = []
+        for item in payload.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol", "")).upper().strip()
+            price = parse_float_field(item.get("price"))
+            if not is_tradeable_equity_symbol(symbol) or price < min_price:
+                continue
+            pct = parse_float_field(item.get("percent_change"))
+            items.append(f"{symbol} {pct:+.1f}% (${price:.2f})")
+            if len(items) >= limit:
+                break
+        lines.append(f"- {label}: {', '.join(items) or 'none'}")
+    return "\n".join(lines)
+
+
+_DEAD_ORDER_STATUSES = frozenset({"canceled", "expired", "rejected", "replaced"})
+
+
+def format_recent_orders(orders_json: str, *, limit: int = 12) -> str:
+    """Markdown table of recent filled and still-open orders (newest first)."""
+    raw = parse_mcp_json(orders_json)
+    payload = unwrap_alpaca_payload(raw) if raw is not None else None
+    if isinstance(payload, dict):
+        payload = payload.get("orders") or payload.get("result") or []
+    if not isinstance(payload, list):
+        return ""
+    rows: list[str] = []
+    for item in payload:
+        if len(rows) >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("status", "")) in _DEAD_ORDER_STATUSES:
+            continue
+        when = str(item.get("filled_at") or item.get("submitted_at") or "")[:10]
+        fill = parse_float_field(item.get("filled_avg_price"))
+        qty = parse_float_field(item.get("filled_qty")) or parse_float_field(item.get("qty"))
+        kind = str(item.get("type", ""))
+        stop = parse_float_field(item.get("stop_price"))
+        if stop > 0:
+            kind = f"{kind} @ ${stop:.2f}"
+        rows.append(
+            f"| {when} | {item.get('symbol', '')} | {item.get('side', '')} | {qty:g} | "
+            f"{kind} | {item.get('status', '')} | {f'${fill:.2f}' if fill else '—'} |"
+        )
+    if not rows:
+        return "_No recent orders._"
+    return "\n".join(
+        [
+            "| Date | Symbol | Side | Qty | Type | Status | Fill price |",
+            "| --- | --- | --- | ---: | --- | --- | ---: |",
+            *rows,
+        ]
+    )
+
+
 def extract_mover_symbols(
     movers_result: str,
     n: int = 3,
@@ -336,7 +401,8 @@ async def load_positions_and_movers(
     movers_json = await call_mcp_tool(
         manager,
         "get_market_movers",
-        {"market_type": "stocks"},
+        # Top lists are mostly warrants and pennies; fetch more so real names remain.
+        {"market_type": "stocks", "top": 50},
         tool_call_log=tool_call_log,
     )
     return PositionsAndMovers(
