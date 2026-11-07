@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,7 @@ from store import (
 )
 from util.symbols import sanitize_symbol_list
 from util.text import truncate_text
+from util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,9 @@ async def _fetch_stock_bars(
         return ""
     chunk_size = 8
     parts: list[str] = []
+    # SIP = consolidated volume (IEX alone is ~3% of it). Free plans reject SIP
+    # data newer than 15 minutes, so end the window just before that.
+    end = (utcnow() - timedelta(minutes=16)).strftime("%Y-%m-%dT%H:%M:%SZ")
     for i in range(0, len(valid), chunk_size):
         chunk = valid[i : i + chunk_size]
         text = await call_mcp_tool(
@@ -243,7 +247,8 @@ async def _fetch_stock_bars(
                 "symbols": ",".join(chunk),
                 "timeframe": "1Day",
                 "days": HORIZON_DAYS,
-                "feed": "iex",
+                "end": end,
+                "feed": "sip",
             },
             tool_call_log=tool_call_log,
         )
