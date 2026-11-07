@@ -58,8 +58,7 @@ def _sizing_hint(brief: ResearchBrief, max_position_pct: float) -> str:
     lines = [
         f"Equity: ${equity:,.2f} | Cash: ${brief.cash_available:,.2f} | "
         f"Max per name: ${max_dollars:,.2f} ({max_position_pct:.0%} of equity). "
-        "HOLD is valid. qty = min(cash, max per name) / last price. "
-        "Skip buys where 1 share exceeds the name cap."
+        "HOLD is valid. qty = min(cash, max per name) / last price (fractional OK)."
     ]
     priced = []
     for symbol in brief.all_symbols:

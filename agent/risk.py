@@ -174,19 +174,8 @@ def validate_orders(
                 f"(price=${price:.2f}, max ${max_name_notional:.2f} per name)"
             )
             continue
-        if price > max_name_notional and price > cash_remaining:
-            rejections.append(
-                f"BUY {order.symbol}: 1 share (${price:.2f}) exceeds equity/cash cap "
-                f"(${max_name_notional:.2f} per name)"
-            )
-            continue
-        if price > max_name_notional or cap_shares < 1:
-            if cap_shares < 1 and price > room:
-                rejections.append(
-                    f"BUY {order.symbol}: 1 share (${price:.2f}) exceeds remaining "
-                    f"name cap ${room:.2f}"
-                )
-                continue
+        # Fractional qty is allowed here; execution skips sub-1 qty on
+        # non-fractionable assets (format_order_qty never rounds up).
         capped = min(qty, cap_shares)
         if capped < qty:
             rejections.append(

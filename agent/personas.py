@@ -71,7 +71,7 @@ Only US equities. You may propose up to {max_orders} orders.
 - Cash is an option, not a failure. HOLD is a valid output when edge is unclear.
 - Trade only when you have a thesis (catalyst, mispricing, or a position that is wrong).
 - Size from conviction using the price table: qty = min(available cash, {max_position_pct:.0%} of equity) / last price.
-  Do not invent share counts. Do not spray token probes. Skip a buy if 1 share exceeds the name cap.
+  Do not invent share counts. Do not spray token probes. Fractional qty is allowed.
 - Sells should be decisive when a holding is wrong or capital is better used elsewhere.
 - Use the Identity section for held names (ticker is the listed equity, not a similarly named crypto token).
 

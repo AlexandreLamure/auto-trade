@@ -204,7 +204,26 @@ class AgentOrchestrator:
                     logger.warning("Asset lookup failed for %s: %s", order.symbol, exc)
                 log.line(f"  Asset {order.symbol}: fractionable={fractionable}")
 
-                qty_str = format_order_qty(order.quantity, fractionable=fractionable)
+                stop_px = 0.0
+                if order.side == "buy" and self._settings.enable_stops:
+                    ref = ask if ask > 0 else last
+                    if ref > 0:
+                        dist = stop_distance(
+                            ref,
+                            brief.price_stats.get(order.symbol),
+                            stop_atr_multiple=self._settings.stop_atr_multiple,
+                            stop_pct=self._settings.stop_pct,
+                        )
+                        stop_px = round(ref - dist, 2)
+                        if not 0 < stop_px < ref:
+                            stop_px = 0.0
+
+                # Alpaca rejects fractional qty on OTO orders (simple only), so a
+                # stop-protected buy is floored to whole shares when it can be.
+                order_qty = order.quantity
+                if stop_px > 0 and order_qty >= 1:
+                    order_qty = float(int(order_qty))
+                qty_str = format_order_qty(order_qty, fractionable=fractionable)
                 if qty_str is None:
                     reason = (
                         f"{order.side.upper()} {order.symbol}: skipped, "
@@ -233,23 +252,18 @@ class AgentOrchestrator:
                 }
                 if use_limit:
                     payload["limit_price"] = str(limit_px)
-                if (
-                    order.side == "buy"
-                    and self._settings.enable_stops
-                ):
-                    ref = ask if ask > 0 else last
-                    if ref > 0:
-                        dist = stop_distance(
-                            ref,
-                            brief.price_stats.get(order.symbol),
-                            stop_atr_multiple=self._settings.stop_atr_multiple,
-                            stop_pct=self._settings.stop_pct,
+                if stop_px > 0:
+                    if submitted_qty.is_integer():
+                        # Bracket needs a take-profit leg; OTO accepts a lone stop-loss.
+                        # Legs inherit time_in_force: gtc keeps the stop alive past today.
+                        payload["order_class"] = "oto"
+                        payload["stop_loss_stop_price"] = str(stop_px)
+                        payload["time_in_force"] = "gtc"
+                    else:
+                        log.line(
+                            f"  No stop on {order.symbol}: fractional qty {qty_str} "
+                            "must be a simple order"
                         )
-                        stop_px = round(ref - dist, 2)
-                        if 0 < stop_px < ref:
-                            # Bracket needs a take-profit leg; OTO accepts a lone stop-loss.
-                            payload["order_class"] = "oto"
-                            payload["stop_loss_stop_price"] = str(stop_px)
                 result = await manager.call_tool("place_stock_order", payload)
                 result_text = manager.result_to_text(result)
                 failed = bool(result.isError) or result_text.startswith("ERROR")
