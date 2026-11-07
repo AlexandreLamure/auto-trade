@@ -263,7 +263,7 @@ async def _load_asset_names(
         text = await call_mcp_tool(
             manager,
             "get_asset",
-            {"symbol": symbol},
+            {"symbol_or_asset_id": symbol},
             tool_call_log=tool_call_log,
         )
         name = parse_asset_name(text)

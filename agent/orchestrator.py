@@ -169,8 +169,10 @@ class AgentOrchestrator:
             try:
                 quote_text = ""
                 try:
+                    # IEX is the free real-time feed; SIP latest needs a paid plan.
                     quote_result = await manager.call_tool(
-                        "get_stock_latest_quote", {"symbol": order.symbol}
+                        "get_stock_latest_quote",
+                        {"symbols": order.symbol, "feed": "iex"},
                     )
                     quote_text = manager.result_to_text(quote_result)
                 except Exception as exc:  # noqa: BLE001
@@ -194,7 +196,7 @@ class AgentOrchestrator:
                 fractionable = False
                 try:
                     asset_result = await manager.call_tool(
-                        "get_asset", {"symbol": order.symbol}
+                        "get_asset", {"symbol_or_asset_id": order.symbol}
                     )
                     asset_text = manager.result_to_text(asset_result)
                     fractionable = parse_fractionable(asset_text)
