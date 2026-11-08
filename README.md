@@ -1,182 +1,71 @@
 # Auto-Trade – Local Autonomous Trading Agent
 
-A fully local autonomous stock trading agent that uses a local LLM (via Ollama),
-Alpaca paper trading, and MCP tool servers. A multi-agent investment committee
-performs deep research, debates the best move, and rebalances the paper portfolio
-toward 30-day PnL — up to 10 minutes per cycle.
+A local autonomous stock trading agent: a local LLM (Ollama) runs an investment
+committee that trades an Alpaca paper account toward 30-day PnL, using news
+grouped into market events by a separate news pipeline.
 
-Market intelligence is provided by a news analysis pipeline that fetches news,
-groups articles into market events, and stores structured summaries in a shared
-SQLite event store. One process runs news and/or trading: a single shot, or a
-daily loop at 12:00 America/New_York. Cycles skip immediately when the US cash
-session is closed (weekdays 09:30–16:00 ET).
-
----
-
-## Architecture
+## How it works
 
 ```
 main.py  (--news-once | --trade-once | --once | --loop | --clean)
-  ├── news/pipeline.py
-  │    ├── news/collector.py       (APIs + RSS feeds)
-  │    ├── news/analyzer.py        (dedupe, group, LLM enrich)
-  │    └── store/events.py         → data/events.db
-  └── agent/orchestrator.py
-       ├── agent/research.py        (Phase 1: Alpaca data + event store query)
-       ├── agent/deliberation.py    (Phase 2: 4 traders + chair debate)
-       ├── agent/personas.py        (trader personalities)
-       ├── agent/risk.py            (pre-trade validation)
-       ├── agent/decision.py        (PortfolioDecision parser)
-       ├── util/llm_client.py       (Ollama via OpenAI SDK)
-       └── servers/manager.py       (Alpaca MCP only)
-            └── servers/alpaca.py   → alpaca-mcp-server (stdio)
+  ├── news/pipeline.py         news cycle → data/events.db
+  │    ├── collector.py        RSS, Alpaca news (Benzinga), NewsAPI, Finnhub,
+  │    │                       Alpha Vantage, Marketaux, Reddit, SEC EDGAR
+  │    └── analyzer.py         dedupe, LLM-cluster into events, LLM-enrich
+  └── agent/orchestrator.py    trading cycle
+       ├── research.py         Alpaca portfolio, prices, candidates + events → brief
+       ├── deliberation.py     4 traders (+ debate if they disagree) → chair
+       ├── risk.py             cash, no shorts, max position, max orders
+       └── servers/            alpaca-mcp-server (stdio) for data and orders
 ```
 
-**News cycle**: resolves a dynamic watchlist from Alpaca (held positions +
-gainers/losers + event tickers, same as the trading agent); fetches from RSS
-(first-class), Alpaca news (Benzinga), NewsAPI, Finnhub, Alpha Vantage, and
-Marketaux; deduplicates
-articles; groups into market events; LLM-enriches each event with summary,
-sentiment, importance, and tickers. Skips immediately if the US cash session
-is closed.
+**News cycle**: builds a watchlist (holdings, market movers, tickers from recent
+events), fetches news, groups articles into events, and has the LLM summarize
+each event with sentiment, importance, and tickers.
 
-**Trading cycle**: reads portfolio data from Alpaca and market events from the
-store. Each cycle writes a decision journal (proposals, fills, later 1d/5d/30d
-marks from daily closes) into the event store; the committee sees its recent
-decisions and their outcomes in the brief, plus the thesis and exit plan it recorded
-for each holding. Skips immediately if the US cash session is closed.
-
----
-
-## Prerequisites
-
-| Requirement | Notes |
-|---|---|
-| Python 3.11+ | |
-| [Ollama](https://ollama.com/download) | Must be running: `ollama serve` |
-| An Ollama model | `ollama pull qwen2.5:7b` (minimum); Qwen3+ recommended for committee |
-| Alpaca paper account | [app.alpaca.markets](https://app.alpaca.markets/paper/dashboard/overview) |
-| News API keys (optional) | RSS runs without keys; add API keys for broader coverage |
-
-Paper API keys must start with `PK`; live keys start with `AK`. The trading agent validates the prefix against `ALPACA_PAPER_TRADE` at startup.
-
----
+**Trading cycle** (skipped when the US cash session is closed): builds a ~5k-token
+brief (portfolio, price table, movers, recent orders, events, past decisions and
+their outcomes, the thesis and exit plan of each holding). Four trader personas
+propose orders, debate if they disagree, and a chair decides the orders, stops,
+and plans. Only holdings and filtered candidates can be traded. Every cycle is
+journaled in `data/events.db`, with 1d/5d/30d outcome marks from daily closes.
 
 ## Setup
 
-### 1. Create a virtual environment and install dependencies
+Requires Python 3.11+, [Ollama](https://ollama.com/download), and an
+[Alpaca paper account](https://app.alpaca.markets/paper/dashboard/overview).
 
 ```bash
-cd auto-trade
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-
+.venv\Scripts\activate          # macOS / Linux: source .venv/bin/activate
 pip install -r requirements.txt
-pre-commit install
+pre-commit install              # gitleaks secret scan on every commit
+cp .env.example .env            # then fill in your keys (see .env.example)
+ollama pull qwen3:14b
 ```
 
-This installs a **gitleaks** pre-commit hook that scans every commit for secrets (API keys, tokens, etc.) before it lands in git.
-
-### 2. Configure environment variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your credentials. See `.env.example` for all options.
-
-### 3. Pull an Ollama model and verify it is running
-
-```bash
-ollama pull qwen2.5:7b
-ollama serve
-```
-
----
+Paper keys start with `PK`, live keys with `AK`; the prefix is checked against
+`ALPACA_PAPER_TRADE` at startup. News API keys are optional.
 
 ## Running
 
-With no flags, `python main.py` prints help and exits. Pick one mode:
-
 ```bash
-python main.py --news-once     # one news cycle, then exit
-python main.py --trade-once    # one trade cycle, then exit
-python main.py --once          # news, then trade, then exit
+python main.py --news-once     # one news cycle
+python main.py --trade-once    # one trade cycle
+python main.py --once          # news, then trade
 python main.py --loop          # news then trade, every day at 12:00 America/New_York
-python main.py --clean         # delete data/events.db and logs/*.log, then exit
+python main.py --clean         # delete data/events.db and logs/*.log
 ```
 
-`--once` and `--loop` always run news then trading sequentially (the next step
-starts when the previous one finishes). If the US cash session is closed when a
-cycle starts, that cycle logs `SKIP – market closed` and returns immediately.
+Run a news cycle before the first trade cycle. Human-readable cycle logs go to
+`logs/news.log` and `logs/trading.log`; warnings and errors go to stderr.
 
-`--clean` deletes the event store (`data/events.db` and SQLite sidecars) and `*.log` files in `logs/`.
+## Execution notes
 
----
-
-## Logging
-
-Each agent writes human-readable cycle logs to a single file. Cycles are separated
-by banner lines. Warnings and errors go to stderr only (nothing printed for normal
-operation).
-
-| File | Service |
-|---|---|
-| `logs/news.log` | Sources fetched, article counts, LLM enrichment |
-| `logs/trading.log` | Alpaca calls, event store query, committee deliberation, orders |
-
----
-
-## Project structure
-
-```
-auto-trade/
-├── agent/
-│   ├── decision.py         # PortfolioDecision + persona parsers
-│   ├── deliberation.py     # Multi-round committee loop
-│   ├── orchestrator.py     # Cycle coordinator, execution, logging
-│   ├── personas.py         # Trader + chair prompts
-│   ├── research.py         # Alpaca research + event store query
-│   ├── risk.py             # Pre-trade validation
-│   └── workflow.py         # Shared MCP helpers
-├── news/
-│   ├── analyzer.py         # Dedupe, group, LLM enrich
-│   ├── collector.py        # Multi-source fetch orchestration
-│   ├── feeds.py            # RSS feed configuration
-│   ├── pipeline.py         # One news cycle
-│   └── sources/            # NewsAPI, Finnhub, RSS, etc.
-├── store/
-│   ├── db.py               # SQLite + WAL mode
-│   └── events.py           # Event store CRUD and queries
-├── servers/
-│   ├── alpaca.py           # Alpaca MCP subprocess launcher
-│   └── manager.py          # MCPManager: Alpaca session only
-├── config/
-│   └── settings.py         # Pydantic settings (reads .env)
-├── data/
-│   └── events.db           # Shared event store (gitignored)
-├── logs/
-│   ├── news.log            # News cycle log (human-readable)
-│   └── trading.log         # Trading cycle log (human-readable)
-├── main.py                 # Single entry point
-├── .env.example
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Notes and limitations
-
-- **Paper trading only by default.** Set `ALPACA_PAPER_TRADE=false` and use live keys to trade with real money — do so at your own risk.
-- The agent places **limit orders** from the latest NBBO when a quote is available, with `time_in_force=day`, and keeps fractional qty on fractionable names. The committee picks each buy's stop price (or none); a stopped buy is an OTO `gtc` order floored to whole shares (Alpaca rejects fractional OTO), and a buy under 1 share gets no stop. Open orders on a symbol are cancelled before trading it (a stop reserves the shares); a partial sell re-places the stop on the remainder.
-- Run `python main.py --news-once` (while the cash session is open) to populate the event store before the first `--trade-once`.
-- RSS feeds run without API keys; optional API keys extend coverage.
-- Model quality matters for JSON-only persona output. `qwen2.5:7b` is the documented minimum; larger models (e.g. Qwen3) work better with `ENABLE_THINKING=true`.
-- Buy orders are capped by `max_position_pct` using latest bar close prices from research.
-- The optimization horizon is fixed at **30 days** in code (`HORIZON_DAYS` in `agent/personas.py`).
+- **Paper trading by default.** Live trading (`ALPACA_PAPER_TRADE=false`) is at your own risk.
+- Orders are day limit orders from the latest IEX quote (market if no quote); fractional
+  qty is kept on fractionable names. Buys are capped by `MAX_POSITION_PCT` of equity.
+- The committee picks each buy's stop price (or none). A stopped buy is an OTO `gtc`
+  order floored to whole shares (Alpaca rejects fractional OTO). Open orders on a symbol
+  are cancelled before trading it; a partial sell re-places the stop on the remainder.
+- The horizon is fixed at 30 days (`HORIZON_DAYS` in `agent/personas.py`).
