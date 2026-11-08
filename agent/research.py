@@ -130,7 +130,7 @@ def _parse_month_pnl(history_json: str) -> float | None:
     if not isinstance(payload, dict):
         return None
 
-    equity = payload.get("equity") or payload.get("profit_loss") or []
+    equity = payload.get("equity") or []
     if not isinstance(equity, list) or len(equity) < 2:
         return None
     try:
@@ -290,10 +290,6 @@ def earnings_flags_from_events(
     within_days: int,
 ) -> dict[str, str]:
     """Mark names with a recent earnings/guidance event in the lookback window."""
-    from datetime import timedelta
-
-    from util.time import utcnow
-
     allow = {s.upper() for s in symbols}
     cutoff = utcnow() - timedelta(days=within_days)
     flags: dict[str, str] = {}

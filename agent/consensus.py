@@ -29,10 +29,6 @@ class SymbolTally:
         return None
 
     @property
-    def majority_count(self) -> int:
-        return max(self.buy_votes, self.sell_votes)
-
-    @property
     def mean_confidence(self) -> float:
         return mean(self.confidences) if self.confidences else 0.0
 
@@ -45,7 +41,6 @@ class SymbolTally:
 def tally_proposals(proposals: list[PersonaProposal]) -> dict[str, SymbolTally]:
     """Count directional votes from trader proposals."""
     tallies: dict[str, SymbolTally] = {}
-    n_traders = max(1, len(proposals))
     voted: dict[str, set[str]] = defaultdict(set)
 
     for proposal in proposals:

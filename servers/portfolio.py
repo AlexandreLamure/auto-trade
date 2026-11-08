@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from servers.manager import MCPManager
 from util.symbols import is_tradeable_equity_symbol
+from util.time import parse_iso, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,6 @@ class Position:
     unrealized_pl: float = 0.0
     unrealized_plpc: float = 0.0
     cost_basis: float = 0.0
-    change_today: float = 0.0
     days_held: int | None = None
     name: str = ""
 
@@ -129,9 +130,6 @@ def parse_positions(positions_json: str) -> list[Position]:
                 unrealized_pl=unrealized,
                 unrealized_plpc=plpc,
                 cost_basis=cost,
-                change_today=parse_float_field(
-                    pos.get("change_today") or pos.get("unrealized_intraday_pl")
-                ),
             )
         )
     return result
@@ -139,10 +137,6 @@ def parse_positions(positions_json: str) -> list[Position]:
 
 def estimate_days_held(orders_json: str) -> dict[str, int]:
     """Approximate days held from the oldest filled buy in recent orders."""
-    from datetime import datetime, timezone
-
-    from util.time import parse_iso, utcnow
-
     raw = parse_mcp_json(orders_json)
     if raw is None:
         return {}
