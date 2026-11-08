@@ -7,6 +7,10 @@ import re
 
 _EQUITY_RE = re.compile(r"^[A-Z]{1,5}$")
 _INDEX_BLOCKLIST = frozenset({"SPX", "VIX", "NDX", "DJIA", "DJI", "COMP"})
+# Leveraged daily-reset funds: "2x Long IONQ Daily ETF", "Bull 3X ETF", "ProShares UltraPro QQQ".
+_LEVERAGE_RE = re.compile(r"\b\d+(?:\.\d+)?x\b|\bleveraged\b", re.IGNORECASE)
+_FUND_RE = re.compile(r"\b(?:ETF|ETN|Fund|Trust|Daily)\b", re.IGNORECASE)
+_PROSHARES_ULTRA_RE = re.compile(r"\bProShares Ultra", re.IGNORECASE)
 
 
 def is_tradeable_equity_symbol(symbol: str) -> bool:
@@ -19,6 +23,14 @@ def is_tradeable_equity_symbol(symbol: str) -> bool:
     if len(sym) >= 5 and sym.endswith("W"):
         return False
     return True
+
+
+def is_leveraged_fund(asset_name: str) -> bool:
+    """True when an Alpaca asset name describes a leveraged ETF/ETN."""
+    name = asset_name or ""
+    if _PROSHARES_ULTRA_RE.search(name):
+        return True
+    return bool(_LEVERAGE_RE.search(name) and _FUND_RE.search(name))
 
 
 def sanitize_symbol_list(symbols: list[str] | None) -> list[str]:

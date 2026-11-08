@@ -54,7 +54,7 @@ from store import (
     query_events,
     update_marks,
 )
-from util.symbols import sanitize_symbol_list
+from util.symbols import is_leveraged_fund, sanitize_symbol_list
 from util.time import utcnow
 
 logger = logging.getLogger(__name__)
@@ -469,6 +469,13 @@ async def run_deep_research(
     for pos in holdings:
         if pos.current_price > 0:
             latest_prices.setdefault(pos.symbol, pos.current_price)
+
+    candidate_names = await _load_asset_names(manager, candidates, log)
+    leveraged = [s for s in candidates if is_leveraged_fund(candidate_names.get(s, ""))]
+    if leveraged:
+        logger.info("Dropped leveraged funds from candidates: %s", ", ".join(leveraged))
+        candidates = [s for s in candidates if s not in leveraged]
+        all_symbols = list(dict.fromkeys(held + candidates))
 
     asset_names = await _load_asset_names(manager, held, log)
     for pos in holdings:
