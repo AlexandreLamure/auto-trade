@@ -31,7 +31,6 @@ from agent.workflow import (
 from agent.deliberation import run_committee
 from agent.research import (
     ResearchBrief,
-    enrich_brief_prices,
     refresh_journal_marks,
     run_deep_research,
 )
@@ -104,12 +103,6 @@ class AgentOrchestrator:
         )
         _log_decision(portfolio_decision, log)
 
-        order_symbols = [o.symbol for o in portfolio_decision.orders]
-        if order_symbols:
-            brief = await enrich_brief_prices(
-                manager, brief, order_symbols, self._settings
-            )
-
         ctx = build_validation_context(
             self._settings,
             cash_available=brief.cash_available,
@@ -117,8 +110,18 @@ class AgentOrchestrator:
             latest_prices=brief.latest_prices,
             portfolio_equity=brief.portfolio_equity,
         )
+        # Only symbols the brief researched (holdings + filtered candidates) can trade,
+        # so names seen only in the movers or news lines bypass no candidate filter.
         gated_orders = portfolio_decision.orders
-        approved, rejections = validate_orders(gated_orders, ctx)
+        researched = set(brief.all_symbols)
+        approved, rejections = validate_orders(
+            [o for o in gated_orders if o.symbol in researched], ctx
+        )
+        rejections = [
+            f"{o.side.upper()} {o.symbol}: not in the research brief"
+            for o in gated_orders
+            if o.symbol not in researched
+        ] + rejections
         if rejections:
             logger.warning("Order validation notes: %s", "; ".join(rejections))
             for note in rejections:

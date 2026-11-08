@@ -11,7 +11,7 @@ from the shared event store (populated by the news analysis service).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,9 +33,7 @@ from servers.portfolio import (
 )
 from agent.personas import HORIZON_DAYS
 from agent.workflow import (
-    PriceStats,
     compute_price_analytics,
-    compute_price_stats,
     expand_symbol_universe,
     filter_liquid_candidates,
     merge_bars_json,
@@ -82,8 +80,6 @@ class ResearchBrief:
     market_events: list[MarketEvent] = field(default_factory=list)
     holdings: list[Position] = field(default_factory=list)
     holdings_markdown: str = ""
-    price_stats: dict[str, PriceStats] = field(default_factory=dict)
-    earnings_flags: dict[str, str] = field(default_factory=dict)
 
     def to_prompt_context(self) -> str:
         return self.summary_markdown
@@ -494,9 +490,7 @@ async def run_deep_research(
         all_symbols,
         within_days=settings.earnings_blackout_days,
     )
-    price_stats: dict[str, PriceStats] = {}
     if bars:
-        price_stats = compute_price_stats(bars, all_symbols)
         price_analytics_markdown = compute_price_analytics(
             bars, all_symbols, earnings=earn_flags
         )
@@ -566,46 +560,4 @@ async def run_deep_research(
         market_events=market_events,
         holdings=holdings,
         holdings_markdown=holdings_markdown,
-        price_stats=price_stats,
-        earnings_flags=earn_flags,
-    )
-
-
-async def enrich_brief_prices(
-    manager: MCPManager,
-    brief: ResearchBrief,
-    symbols: list[str],
-    settings: Settings,
-) -> ResearchBrief:
-    """Fetch bar data for symbols missing from the research universe (chair verify)."""
-    missing = sanitize_symbol_list(
-        [s.upper() for s in symbols if s.upper() not in brief.latest_prices]
-    )
-    if not missing:
-        return brief
-
-    bars = await _fetch_stock_bars(manager, missing, brief.tool_call_log)
-    new_prices = parse_latest_prices(bars)
-    extra_stats = compute_price_stats(bars)
-    extra_analytics = compute_price_analytics(bars, earnings=brief.earnings_flags)
-
-    updated_prices = {**brief.latest_prices, **new_prices}
-    updated_stats = {**brief.price_stats, **extra_stats}
-    combined_analytics = brief.price_analytics_markdown
-    if extra_analytics and "No price analytics" not in extra_analytics:
-        combined_analytics = (
-            f"{combined_analytics}\n\n### Additional symbols\n{extra_analytics}".strip()
-        )
-
-    all_symbols = list(dict.fromkeys(brief.all_symbols + missing))
-    sections = dict(brief.raw_sections)
-    sections["price_analytics"] = combined_analytics
-
-    return replace(
-        brief,
-        all_symbols=all_symbols,
-        latest_prices=updated_prices,
-        price_analytics_markdown=combined_analytics,
-        price_stats=updated_stats,
-        raw_sections=sections,
     )
