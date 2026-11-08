@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from config.settings import Settings
 from news.models import Signal
 from news.sources.base import extract_tickers, url_hash
-from news.weights import apply_weighted_scores
 from store import (
     MarketEvent,
     StoredArticle,
@@ -245,8 +244,6 @@ def _log_event_enrichment(
     enriched: EnrichedEvent,
     *,
     parsed_ok: bool,
-    importance: int,
-    confidence: float,
 ) -> None:
     log.line(f"Event {event_id[:8]} ({len(event_signals)} article(s)):")
     for sig in event_signals:
@@ -254,7 +251,7 @@ def _log_event_enrichment(
     if parsed_ok:
         log.line(
             f"  LLM → type={enriched.event_type} sentiment={enriched.sentiment} "
-            f"importance={importance} confidence={confidence:.2f} "
+            f"importance={enriched.importance} confidence={enriched.confidence:.2f} "
             f"tickers={', '.join(enriched.tickers) or '—'}"
         )
         log.line(f"  Summary: {enriched.summary}")
@@ -265,8 +262,8 @@ def _log_event_enrichment(
             event_id[:8],
             enriched.event_type,
             enriched.sentiment,
-            importance,
-            confidence,
+            enriched.importance,
+            enriched.confidence,
         )
 
 
@@ -370,19 +367,12 @@ async def _persist_enrichment(
     stats: dict[str, int],
 ) -> None:
     enriched, parsed_ok = await _enrich_event(llm, event_signals)
-    importance, confidence = apply_weighted_scores(
-        event_signals,
-        importance=enriched.importance,
-        confidence=enriched.confidence,
-    )
     _log_event_enrichment(
         log,
         event_id,
         event_signals,
         enriched,
         parsed_ok=parsed_ok,
-        importance=importance,
-        confidence=confidence,
     )
     update_event(
         db_path,
@@ -390,8 +380,8 @@ async def _persist_enrichment(
         summary=enriched.summary,
         event_type=enriched.event_type,
         sentiment=enriched.sentiment,
-        importance=importance,
-        confidence=confidence,
+        importance=enriched.importance,
+        confidence=enriched.confidence,
         tickers=enriched.tickers,
         companies=enriched.companies,
         article_count=len(event_signals),

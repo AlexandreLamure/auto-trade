@@ -1,11 +1,6 @@
-"""Source weight resolution and weighted event scoring."""
+"""Source weight resolution."""
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from news.models import Signal
 
 UNKNOWN_SOURCE_WEIGHT = 0.5
 
@@ -25,24 +20,3 @@ def resolve_weight(source: str, weights: dict[str, float]) -> float:
     weight_key = _SOURCE_PREFIX_MAP.get(prefix, prefix)
     return weights.get(weight_key, UNKNOWN_SOURCE_WEIGHT)
 
-
-def apply_weighted_scores(
-    signals: list[Signal],
-    *,
-    importance: int,
-    confidence: float,
-) -> tuple[int, float]:
-    """Adjust LLM-derived importance and confidence using signal source weights."""
-    if not signals:
-        return importance, confidence
-
-    avg_w = sum(s.weight for s in signals) / len(signals)
-    max_w = max(s.weight for s in signals)
-    high_w = sum(1 for s in signals if s.weight >= 0.9)
-
-    adj_confidence = min(1.0, confidence * (0.7 + 0.3 * avg_w) + 0.05 * high_w)
-    adj_importance = min(
-        5,
-        max(1, round(importance * (0.6 + 0.4 * max_w) + 0.1 * (len(signals) - 1))),
-    )
-    return adj_importance, adj_confidence
