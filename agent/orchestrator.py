@@ -37,7 +37,7 @@ from agent.research import (
 )
 from agent.risk import build_validation_context, validate_orders
 from store import MarketEvent
-from store.journal import record_cycle
+from store.journal import record_cycle, save_position_plan
 from util.cycle_log import CycleLog, get_trading_log
 from util.llm_client import OllamaClient
 from util.session import is_market_open, market_closed_message
@@ -161,6 +161,13 @@ class AgentOrchestrator:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to persist decision journal: %s", exc)
+
+        try:
+            _save_position_plans(
+                self._settings.event_store_path, portfolio_decision, approved, fills, brief
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save position plans: %s", exc)
 
     async def _execute_portfolio(
         self,
@@ -440,6 +447,33 @@ async def _restore_stop(
         logger.warning("Stop restore failed for %s: %s", symbol, text)
 
 
+def _save_position_plans(
+    db_path: str,
+    decision: PortfolioDecision,
+    approved: list[TradeOrder],
+    fills: list[ExecutionRecord],
+    brief: ResearchBrief,
+) -> None:
+    """Store the thesis/exit plan of placed buys and the chair's revisions for holdings.
+
+    Plans of buys that never fill are pruned next cycle, once the symbol is not held.
+    """
+    placed = {
+        rec.symbol for rec in fills if rec.side == "buy" and rec.status in {"filled", "submitted"}
+    }
+    for order in approved:
+        if order.side == "buy" and order.symbol in placed:
+            save_position_plan(
+                db_path, order.symbol, thesis=order.rationale, exit_plan=order.exit_plan
+            )
+    held = set(brief.held_symbols)
+    for update in decision.plan_updates:
+        if update.symbol in held and update.symbol not in placed:
+            save_position_plan(
+                db_path, update.symbol, thesis=update.thesis, exit_plan=update.exit_plan
+            )
+
+
 def _log_portfolio(brief: ResearchBrief, log: CycleLog) -> None:
     log.section("Portfolio")
     pnl = f"{brief.month_pnl_pct:+.1f}%" if brief.month_pnl_pct is not None else "unavailable"
@@ -500,8 +534,12 @@ def _log_decision(decision: PortfolioDecision, log: CycleLog) -> None:
         for order in decision.orders:
             stop = f" stop ${order.stop_price:.2f}" if order.stop_price else ""
             log.line(f"Decision: {order.side.upper()} {order.symbol} x{order.quantity:g}{stop}")
+            if order.exit_plan:
+                log.line(f"  Exit plan: {order.exit_plan}")
     else:
         log.line("Decision: HOLD")
+    for update in decision.plan_updates:
+        log.line(f"Plan update {update.symbol}: {update.thesis} | Exit: {update.exit_plan}")
     if decision.consensus_summary:
         log.line(f"Consensus: {decision.consensus_summary}")
     if decision.dissent:

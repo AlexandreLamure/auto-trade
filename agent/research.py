@@ -48,10 +48,12 @@ from store import (
     StoredArticle,
     discover_event_tickers,
     format_decision_history,
+    format_position_plans,
     get_event_articles,
     init_db,
     pending_mark_symbols,
     query_events,
+    sync_position_plans,
     update_marks,
 )
 from util.symbols import is_leveraged_fund, sanitize_symbol_list
@@ -512,6 +514,16 @@ async def run_deep_research(
             for sym, name in asset_names.items()
         )
         holdings_markdown = f"{holdings_markdown}\n\n### Identity\n{ident}"
+    plans = sync_position_plans(
+        settings.event_store_path,
+        held,
+        prune=parse_mcp_json(snapshot.positions_json) is not None,
+    )
+    if held:
+        holdings_markdown = (
+            f"{holdings_markdown}\n\n### Plan recorded at purchase\n"
+            f"{format_position_plans(plans, held)}"
+        )
     sections["holdings"] = holdings_markdown
 
     if not (price_analytics_markdown or "").strip() or "No price analytics" in (

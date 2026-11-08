@@ -41,6 +41,7 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
     rationales: dict[tuple[str, str], str] = {}
     confidences: dict[tuple[str, str], float] = {}
     stops: dict[tuple[str, str], float] = {}
+    exit_plans: dict[tuple[str, str], str] = {}
     for order in orders:
         key = (order.symbol, order.side)
         nets[key] = nets.get(key, 0.0) + order.quantity
@@ -49,6 +50,8 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
         confidences[key] = max(confidences.get(key, 0.0), order.confidence)
         if order.stop_price:
             stops[key] = order.stop_price
+        if order.exit_plan:
+            exit_plans[key] = order.exit_plan
     result: list[TradeOrder] = []
     for (symbol, side), qty in nets.items():
         if qty <= 0:
@@ -61,6 +64,7 @@ def net_orders(orders: list[TradeOrder]) -> list[TradeOrder]:
                 rationale=rationales.get((symbol, side), ""),
                 confidence=confidences.get((symbol, side), 0.0),
                 stop_price=stops.get((symbol, side)),
+                exit_plan=exit_plans.get((symbol, side), ""),
             )
         )
     return result
@@ -183,6 +187,7 @@ def validate_orders(
                 quantity=qty,
                 rationale=order.rationale,
                 stop_price=order.stop_price,
+                exit_plan=order.exit_plan,
             )
         )
         cash_remaining -= cost

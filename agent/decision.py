@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from util.json_parse import extract_json_block
@@ -33,6 +33,14 @@ class TradeOrder:
     rationale: str
     confidence: float = 0.0
     stop_price: float | None = None  # buys only; None = no protective stop
+    exit_plan: str = ""  # buys only; when to sell (target, invalidation, time limit)
+
+
+@dataclass
+class PlanUpdate:
+    symbol: str
+    thesis: str
+    exit_plan: str
 
 
 @dataclass
@@ -40,6 +48,7 @@ class PortfolioDecision:
     orders: list[TradeOrder]
     consensus_summary: str
     dissent: str | None = None
+    plan_updates: list[PlanUpdate] = field(default_factory=list)
 
     @property
     def parsed_ok(self) -> bool:
@@ -82,6 +91,7 @@ def order_to_dict(order: TradeOrder) -> dict[str, Any]:
         "qty": order.quantity,
         "rationale": order.rationale,
         "stop_price": order.stop_price,
+        "exit_plan": order.exit_plan,
     }
 
 
@@ -223,9 +233,29 @@ def _parse_order_list(raw_orders: Any) -> list[TradeOrder]:
                 quantity=qty,
                 rationale=rationale,
                 stop_price=stop if stop > 0 and side_raw == "buy" else None,
+                exit_plan=_text(item.get("exit_plan")) if side_raw == "buy" else "",
             )
         )
     return orders
+
+
+def _text(value: Any) -> str:
+    return str(value).strip() if value else ""
+
+
+def _parse_plan_updates(raw: Any) -> list[PlanUpdate]:
+    if not isinstance(raw, list):
+        return []
+    updates: list[PlanUpdate] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol", "")).upper().strip()
+        thesis = _text(item.get("thesis"))
+        exit_plan = _text(item.get("exit_plan"))
+        if symbol and (thesis or exit_plan):
+            updates.append(PlanUpdate(symbol=symbol, thesis=thesis, exit_plan=exit_plan))
+    return updates
 
 
 def _validate_portfolio(data: dict) -> PortfolioDecision:
@@ -237,7 +267,12 @@ def _validate_portfolio(data: dict) -> PortfolioDecision:
     dissent = str(dissent_raw).strip() if dissent_raw else None
     if not summary:
         summary = _PARSE_FAILURE_REASON if not orders else "Committee consensus reached."
-    return PortfolioDecision(orders=orders, consensus_summary=summary, dissent=dissent)
+    return PortfolioDecision(
+        orders=orders,
+        consensus_summary=summary,
+        dissent=dissent,
+        plan_updates=_parse_plan_updates(data.get("plan_updates")),
+    )
 
 
 def _extract_json_str(text: str, marker_keys: tuple[str, ...] = ("action",)) -> str | None:

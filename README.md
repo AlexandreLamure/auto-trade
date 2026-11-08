@@ -43,7 +43,8 @@ is closed.
 **Trading cycle**: reads portfolio data from Alpaca and market events from the
 store. Each cycle writes a decision journal (proposals, fills, later 1d/5d/30d
 marks from daily closes) into the event store; the committee sees its recent
-decisions and their outcomes in the brief. Skips immediately if the US cash session is closed.
+decisions and their outcomes in the brief, plus the thesis and exit plan it recorded
+for each holding. Skips immediately if the US cash session is closed.
 
 ---
 

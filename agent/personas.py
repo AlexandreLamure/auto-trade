@@ -51,14 +51,20 @@ CHAIR_JSON_SCHEMA = """\
 ```json
 {
   "orders": [
-    {"symbol": "AAPL", "side": "buy", "qty": 1.25, "stop_price": 182.5, "rationale": "committee rationale"},
-    {"symbol": "TSLA", "side": "sell", "qty": 15, "stop_price": null, "rationale": "trim loser"}
+    {"symbol": "AAPL", "side": "buy", "qty": 1.25, "stop_price": 182.5, "rationale": "thesis: why this should rise within the horizon", "exit_plan": "sell at ~$205, or if services growth guidance is cut, or after 30 days without progress"},
+    {"symbol": "TSLA", "side": "sell", "qty": 15, "stop_price": null, "rationale": "exit condition met"}
+  ],
+  "plan_updates": [
+    {"symbol": "MSFT", "thesis": "revised thesis", "exit_plan": "revised exit plan"}
   ],
   "consensus_summary": "3-5 sentences on the final portfolio action",
   "dissent": "optional minority view or null"
 }
 ```
-qty is shares = min(cash, max per name) / last price. Do not invent share counts."""
+qty is shares = min(cash, max per name) / last price. Do not invent share counts.
+For a buy, rationale is the thesis and exit_plan says when to sell; both are stored and shown
+back next cycles. plan_updates (optional, usually empty) revises the plan of a holding you keep,
+or writes one for a holding with no recorded plan."""
 
 
 def _base_objective(horizon_days: int, max_position_pct: float, max_orders: int) -> str:
@@ -73,6 +79,8 @@ Only US equities. You may propose up to {max_orders} orders.
 - Size from conviction using the price table: qty = min(available cash, {max_position_pct:.0%} of equity) / last price.
   Do not invent share counts. Do not spray token probes. Fractional qty is allowed.
 - Sells should be decisive when a holding is wrong or capital is better used elsewhere.
+- Holdings list the thesis and exit plan recorded at purchase. Judge each holding against it:
+  sell when the exit condition is met or the thesis is broken, hold while it is intact.
 - stop_price (buys only): a protective stop below entry that you choose from the thesis and
   volatility (ATR, realized vol), or null for no stop. Stopped-out positions are sold automatically.
 - Use the Identity section for held names (ticker is the listed equity, not a similarly named crypto token).

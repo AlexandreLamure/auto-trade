@@ -2,8 +2,11 @@
 
 from store.journal import (
     format_decision_history,
+    format_position_plans,
     pending_mark_symbols,
     record_cycle,
+    save_position_plan,
+    sync_position_plans,
     update_marks,
 )
 from store.events import (
@@ -34,6 +37,7 @@ __all__ = [
     "find_candidate_events",
     "find_unenriched_events",
     "format_decision_history",
+    "format_position_plans",
     "get_event_articles",
     "init_db",
     "insert_article",
@@ -41,6 +45,8 @@ __all__ = [
     "prune_old_events",
     "query_events",
     "record_cycle",
+    "save_position_plan",
+    "sync_position_plans",
     "touch_event_seen",
     "update_event",
     "update_marks",

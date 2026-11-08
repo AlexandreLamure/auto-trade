@@ -236,3 +236,58 @@ def format_decision_history(db_path: str, *, limit: int = 12) -> str:
             f"{_pct(r['price_5d'], base)} | {_pct(r['price_30d'], base)} | {rationale} |"
         )
     return "\n".join(lines)
+
+
+def save_position_plan(db_path: str, symbol: str, *, thesis: str, exit_plan: str) -> None:
+    """Insert or revise a holding's plan; keeps opened_at and any field left empty."""
+    now = to_iso(utcnow())
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO position_plans (symbol, thesis, exit_plan, opened_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                thesis = COALESCE(NULLIF(excluded.thesis, ''), position_plans.thesis),
+                exit_plan = COALESCE(NULLIF(excluded.exit_plan, ''), position_plans.exit_plan),
+                updated_at = excluded.updated_at
+            """,
+            (symbol.upper(), thesis.strip(), exit_plan.strip(), now, now),
+        )
+        conn.commit()
+
+
+def sync_position_plans(
+    db_path: str, held: list[str], *, prune: bool = True
+) -> dict[str, dict[str, str]]:
+    """Return the plans of held symbols; with *prune*, delete plans of the others.
+
+    Pass prune=False when the positions fetch failed, so an empty list does not wipe plans.
+    """
+    held_set = {s.upper() for s in held}
+    with get_connection(db_path) as conn:
+        rows = conn.execute("SELECT * FROM position_plans").fetchall()
+        if prune:
+            stale = [r["symbol"] for r in rows if r["symbol"] not in held_set]
+            conn.executemany(
+                "DELETE FROM position_plans WHERE symbol = ?", [(s,) for s in stale]
+            )
+            conn.commit()
+    return {r["symbol"]: dict(r) for r in rows if r["symbol"] in held_set}
+
+
+def format_position_plans(plans: dict[str, dict[str, str]], held: list[str]) -> str:
+    """One bullet per holding with the thesis and exit plan the committee recorded."""
+    lines: list[str] = []
+    for symbol in held:
+        plan = plans.get(symbol.upper())
+        if not plan:
+            lines.append(f"- **{symbol}**: no recorded plan")
+            continue
+        opened = str(plan["opened_at"])[:10]
+        updated = str(plan["updated_at"])[:10]
+        revised = f", revised {updated}" if updated != opened else ""
+        lines.append(
+            f"- **{symbol}** (opened {opened}{revised}): Thesis: {plan['thesis'] or '—'} "
+            f"| Exit plan: {plan['exit_plan'] or '—'}"
+        )
+    return "\n".join(lines)

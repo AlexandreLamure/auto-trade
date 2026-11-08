@@ -87,6 +87,15 @@ CREATE TABLE IF NOT EXISTS cycle_marks (
     marked_30d_at TEXT,
     PRIMARY KEY (cycle_id, symbol)
 );
+
+-- Committee's thesis and exit plan for each held symbol (deleted once no longer held).
+CREATE TABLE IF NOT EXISTS position_plans (
+    symbol TEXT PRIMARY KEY,
+    thesis TEXT NOT NULL DEFAULT '',
+    exit_plan TEXT NOT NULL DEFAULT '',
+    opened_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
