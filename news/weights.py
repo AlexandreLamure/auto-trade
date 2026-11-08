@@ -14,10 +14,8 @@ _SOURCE_PREFIX_MAP: dict[str, str] = {
     "ir": "company_ir",
     "rss": "rss",
     "api": "api",
-    "polymarket": "polymarket",
     "reddit": "reddit",
     "stocktwits": "stocktwits",
-    "google_trends": "google_trends",
 }
 
 

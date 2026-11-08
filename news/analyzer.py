@@ -67,7 +67,7 @@ ENRICH_SYSTEM_PROMPT = """\
 You are a financial market analyst. Given multiple signals about the same market event,
 produce a concise structured summary for traders. Signals come from sources with varying
 reliability (SEC filings and IR press releases are most authoritative; social media
-and search trends are least).
+is least).
 
 Assign tickers only if the company or ticker is explicitly in the signals.
 Never copy a ticker from a feed name. Never use FOREX:, CRYPTO:, futures, indexes,
@@ -205,10 +205,6 @@ def _should_ingest_signal(signal: Signal, watchlist: list[str]) -> bool:
     watchset = {s.upper() for s in watchlist}
     tickers = _signal_tickers(signal, watchlist)
 
-    if signal.source.startswith("polymarket"):
-        if not tickers or not any(t in watchset for t in tickers):
-            return False
-
     if signal.source.startswith("sec_edgar"):
         if not tickers or not any(t in watchset for t in tickers):
             return False
@@ -229,7 +225,7 @@ def _enrichment_priority(event_signals: list[Signal], watchlist: list[str]) -> f
     watchlist_hit = bool(tickers & watchset)
     max_weight = max((s.weight for s in event_signals), default=0.5)
     low_source = any(
-        s.source.startswith(("polymarket", "reddit", "google_trends", "stocktwits"))
+        s.source.startswith(("reddit", "stocktwits"))
         for s in event_signals
     )
     score = max_weight * 10.0

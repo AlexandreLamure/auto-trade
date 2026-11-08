@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _SOURCE_WEIGHTS_DEFAULT = (
     '{"sec_edgar":1.0,"company_ir":1.0,"rss":0.9,"api":0.8,'
-    '"polymarket":0.3,"reddit":0.5,"stocktwits":0.4,"google_trends":0.3}'
+    '"reddit":0.5,"stocktwits":0.4}'
 )
 
 
@@ -69,17 +69,12 @@ class Settings(BaseSettings):
         "python:auto-trade:1.0 (local news agent)",
         description="Reddit API User-Agent (required on every request)",
     )
-    google_trends_spike_threshold: float = Field(
-        1.5, description="Emit Google Trends signal when index exceeds this × trailing avg"
-    )
 
     # Optional signal sources
     enable_alpaca_news: bool = Field(
         True, description="Fetch Alpaca market news (Benzinga) with the Alpaca keys"
     )
     enable_reddit: bool = Field(True, description="Fetch Reddit JSON feeds")
-    enable_polymarket: bool = Field(True, description="Fetch Polymarket prediction markets")
-    enable_google_trends: bool = Field(True, description="Fetch Google Trends spikes")
     enable_sec_edgar: bool = Field(True, description="Fetch SEC EDGAR filings")
     enable_stocktwits: bool = Field(False, description="Fetch Stocktwits (often rate-limited)")
 

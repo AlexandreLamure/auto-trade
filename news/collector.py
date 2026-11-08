@@ -12,11 +12,9 @@ from news.sources.alpaca_news import fetch_alpaca_news
 from news.sources.alpha_vantage import fetch_alpha_vantage
 from news.sources.base import normalize_url, url_hash
 from news.sources.finnhub import fetch_finnhub
-from news.sources.google_trends import fetch_google_trends
 from news.sources.ir_rss import fetch_ir_rss
 from news.sources.marketaux import fetch_marketaux
 from news.sources.newsapi import fetch_newsapi
-from news.sources.polymarket import fetch_polymarket
 from news.sources.reddit import fetch_reddit
 from news.sources.rss import fetch_rss
 from news.sources.sec_edgar import fetch_sec_edgar
@@ -77,19 +75,6 @@ def _build_source_tasks(settings: Settings, watchlist: list[str]) -> list[Source
                 client_secret=settings.reddit_client_secret,
             ),
             settings.enable_reddit,
-        ),
-        (
-            "polymarket",
-            lambda: fetch_polymarket(watchlist_tickers=watchlist),
-            settings.enable_polymarket,
-        ),
-        (
-            "google_trends",
-            lambda: fetch_google_trends(
-                watchlist_tickers=watchlist,
-                spike_threshold=settings.google_trends_spike_threshold,
-            ),
-            settings.enable_google_trends,
         ),
         (
             "sec_edgar",
